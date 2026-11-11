@@ -50,6 +50,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var qualidadeGrupo: LinearLayout
     private lateinit var botaoTodos: MaterialButton
     private lateinit var botaoPrincipal: MaterialButton
+    private lateinit var botaoApagar: MaterialButton
     private lateinit var lista: RecyclerView
     private val adaptador = Adaptador()
 
@@ -154,6 +155,27 @@ class MainActivity : AppCompatActivity() {
         linhaBotoes.addView(botaoPrincipal, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1.4f))
         raiz.addView(linhaBotoes, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(6) })
 
+        botaoApagar = MaterialButton(this, null, com.google.android.material.R.attr.materialButtonOutlinedStyle).apply {
+            setTextColor(0xFFD32F2F.toInt())
+            strokeColor = android.content.res.ColorStateList.valueOf(0xFFD32F2F.toInt())
+            visibility = View.GONE
+            setOnClickListener {
+                val uris = selecionados.toList()
+                val total = videos.filter { it.uri in selecionados }.sumOf { it.tamanho }
+                AlertDialog.Builder(this@MainActivity)
+                    .setTitle("Apagar definitivamente?")
+                    .setMessage("${uris.size} vídeos (${formatarTamanho(total)}) serão apagados para sempre. Não dá para desfazer.")
+                    .setPositiveButton("Apagar") { _, _ ->
+                        if (uris.isNotEmpty()) {
+                            val pi = MediaStore.createDeleteRequest(contentResolver, uris)
+                            pedirLixeira.launch(IntentSenderRequest.Builder(pi.intentSender).build())
+                        }
+                    }
+                    .setNegativeButton("Cancelar", null).show()
+            }
+        }
+        raiz.addView(botaoApagar, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+
         botaoTodos.setOnClickListener { acaoSecundaria() }
         botaoPrincipal.setOnClickListener { acaoPrincipal() }
 
@@ -177,6 +199,7 @@ class MainActivity : AppCompatActivity() {
     private fun atualizarCabecalho() {
         qualidadeGrupo.visibility = if (modo == Modo.VIDEOS) View.VISIBLE else View.GONE
         abas.visibility = if (modo == Modo.FILA) View.GONE else View.VISIBLE
+        botaoApagar.visibility = if (modo == Modo.LIXEIRA) View.VISIBLE else View.GONE
         when (modo) {
             Modo.VIDEOS -> {
                 val total = videos.filter { it.uri in selecionados }.sumOf { it.tamanho }
@@ -187,8 +210,13 @@ class MainActivity : AppCompatActivity() {
                 botaoTodos.visibility = View.VISIBLE
             }
             Modo.LIXEIRA -> {
-                resumo.text = "Originais na lixeira: ficam até 30 dias e depois são apagados pelo Android. " +
-                        "${selecionados.size} selecionados."
+                val ocupado = videos.sumOf { it.tamanho }
+                val sel = videos.filter { it.uri in selecionados }.sumOf { it.tamanho }
+                resumo.text = if (videos.isEmpty()) "A lixeira está vazia."
+                else "${videos.size} vídeos na lixeira ocupando ${formatarTamanho(ocupado)}. " +
+                        "São apagados sozinhos após 30 dias.\n${selecionados.size} selecionados (${formatarTamanho(sel)})."
+                botaoApagar.text = "Apagar definitivamente (${selecionados.size})"
+                botaoApagar.isEnabled = selecionados.isNotEmpty()
                 botaoTodos.text = if (selecionados.size == videos.size && videos.isNotEmpty()) "Limpar" else "Todos"
                 botaoPrincipal.text = "Restaurar (${selecionados.size})"
                 botaoPrincipal.isEnabled = selecionados.isNotEmpty()
