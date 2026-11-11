@@ -68,3 +68,15 @@ jobs:
           body: Baixe o arquivo CompactadorVideos.apk abaixo e instale no celular.
           files: CompactadorVideos.apk
           make_latest: true
+
+      - name: Apagar versões anteriores
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          atual="v${{ github.run_number }}"
+          gh release list -R "${{ github.repository }}" --limit 100 --json tagName --jq '.[].tagName' |
+            while read -r tag; do
+              if [ "$tag" != "$atual" ]; then
+                gh release delete "$tag" -R "${{ github.repository }}" --yes --cleanup-tag
+              fi
+            done
