@@ -15,11 +15,24 @@ android {
         versionName = "1.0.${System.getenv("GITHUB_RUN_NUMBER") ?: "0"}"
     }
 
+    // Chave fixa: o arquivo é criado pelo GitHub Actions a partir do segredo ASSINATURA_SENHA.
+    val chave = file("assinatura.jks")
+    val senha = System.getenv("ASSINATURA_SENHA")
+    signingConfigs {
+        if (chave.exists() && !senha.isNullOrEmpty()) {
+            create("fixa") {
+                storeFile = chave
+                storePassword = senha
+                keyAlias = "compactador"
+                keyPassword = senha
+            }
+        }
+    }
+
     buildTypes {
         release {
             isMinifyEnabled = false
-            // Assinatura de depuração (sem chave guardada no repositório)
-            signingConfig = signingConfigs.getByName("debug")
+            signingConfig = signingConfigs.findByName("fixa") ?: signingConfigs.getByName("debug")
         }
     }
 

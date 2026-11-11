@@ -23,7 +23,33 @@ jobs:
         with:
           gradle-version: "8.10.2"
 
+      - name: Preparar assinatura fixa
+        env:
+          ASSINATURA_SENHA: ${{ secrets.ASSINATURA_SENHA }}
+        run: |
+          if [ -z "$ASSINATURA_SENHA" ]; then
+            echo "::warning::Segredo ASSINATURA_SENHA não configurado; usando assinatura temporária."
+            exit 0
+          fi
+          if [ ! -f app/assinatura.jks.enc ]; then
+            keytool -genkeypair -keystore app/assinatura.jks -alias compactador -keyalg RSA -keysize 2048 \
+              -validity 10000 -storepass "$ASSINATURA_SENHA" -keypass "$ASSINATURA_SENHA" \
+              -dname "CN=Compactador, O=Douglas, C=BR"
+            openssl enc -aes-256-cbc -pbkdf2 -iter 200000 -salt -in app/assinatura.jks \
+              -out app/assinatura.jks.enc -pass env:ASSINATURA_SENHA
+            git config user.name "github-actions"
+            git config user.email "github-actions@users.noreply.github.com"
+            git add app/assinatura.jks.enc
+            git commit -m "Guarda chave de assinatura criptografada [skip ci]"
+            git push
+          else
+            openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 -in app/assinatura.jks.enc \
+              -out app/assinatura.jks -pass env:ASSINATURA_SENHA
+          fi
+
       - name: Compilar
+        env:
+          ASSINATURA_SENHA: ${{ secrets.ASSINATURA_SENHA }}
         run: gradle assembleRelease --no-daemon --stacktrace
 
       - name: Renomear APK
