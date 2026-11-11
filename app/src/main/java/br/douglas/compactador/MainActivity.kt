@@ -44,6 +44,7 @@ class MainActivity : AppCompatActivity() {
     private var modo = Modo.VIDEOS
     private var videos: List<Video> = emptyList()
     private val selecionados = mutableSetOf<android.net.Uri>()
+    private var jaCompactadosCache: Set<android.net.Uri> = emptySet()
 
     private lateinit var abas: MaterialButtonToggleGroup
     private lateinit var resumo: TextView
@@ -74,7 +75,7 @@ class MainActivity : AppCompatActivity() {
 
         lifecycleScope.launch {
             Fila.estado.collect { e ->
-                if (e.emAndamento && modo != Modo.FILA) mudarModo(Modo.FILA)
+                if ((e.emAndamento || e.itens.isNotEmpty()) && modo != Modo.FILA) mudarModo(Modo.FILA)
                 if (modo == Modo.FILA) {
                     adaptador.notifyDataSetChanged()
                     atualizarCabecalho()
@@ -160,6 +161,7 @@ class MainActivity : AppCompatActivity() {
             strokeColor = android.content.res.ColorStateList.valueOf(0xFFD32F2F.toInt())
             visibility = View.GONE
             setOnClickListener {
+                if (modo == Modo.VIDEOS) { moverJaCompactados(); return@setOnClickListener }
                 val uris = selecionados.toList()
                 val total = videos.filter { it.uri in selecionados }.sumOf { it.tamanho }
                 AlertDialog.Builder(this@MainActivity)
@@ -199,7 +201,21 @@ class MainActivity : AppCompatActivity() {
     private fun atualizarCabecalho() {
         qualidadeGrupo.visibility = if (modo == Modo.VIDEOS) View.VISIBLE else View.GONE
         abas.visibility = if (modo == Modo.FILA) View.GONE else View.VISIBLE
-        botaoApagar.visibility = if (modo == Modo.LIXEIRA) View.VISIBLE else View.GONE
+        val vermelho = 0xFFD32F2F.toInt()
+        val azul = 0xFF1E6FD9.toInt()
+        val corExtra = if (modo == Modo.LIXEIRA) vermelho else azul
+        botaoApagar.setTextColor(corExtra)
+        botaoApagar.strokeColor = android.content.res.ColorStateList.valueOf(corExtra)
+        val pendentes = if (modo == Modo.VIDEOS) originaisJaCompactados() else emptyList()
+        botaoApagar.visibility = when (modo) {
+            Modo.LIXEIRA -> View.VISIBLE
+            Modo.VIDEOS -> if (pendentes.isNotEmpty()) View.VISIBLE else View.GONE
+            else -> View.GONE
+        }
+        if (modo == Modo.VIDEOS && pendentes.isNotEmpty()) {
+            botaoApagar.isEnabled = true
+            botaoApagar.text = "Originais já compactados → lixeira (${pendentes.size} • ${formatarTamanho(pendentes.sumOf { it.tamanho })})"
+        }
         when (modo) {
             Modo.VIDEOS -> {
                 val total = videos.filter { it.uri in selecionados }.sumOf { it.tamanho }
@@ -288,8 +304,36 @@ class MainActivity : AppCompatActivity() {
 
     private fun pedirTrash(uris: List<android.net.Uri>, paraLixeira: Boolean) {
         if (uris.isEmpty()) return
-        val pi = MediaStore.createTrashRequest(contentResolver, uris, paraLixeira)
-        pedirLixeira.launch(IntentSenderRequest.Builder(pi.intentSender).build())
+        try {
+            val pi = MediaStore.createTrashRequest(contentResolver, uris, paraLixeira)
+            pedirLixeira.launch(IntentSenderRequest.Builder(pi.intentSender).build())
+        } catch (e: Exception) {
+            AlertDialog.Builder(this).setTitle("Não foi possível")
+                .setMessage("O Android recusou o pedido: ${e.message}").setPositiveButton("OK", null).show()
+        }
+    }
+
+    private fun nomeBase(nome: String) = nome.substringBeforeLast('.')
+
+    /** Originais que já têm uma cópia "_compactado" menor na galeria. */
+    private fun originaisJaCompactados(): List<Video> {
+        val copias = videos.filter { nomeBase(it.nome).endsWith("_compactado") }
+            .associateBy { nomeBase(it.nome).removeSuffix("_compactado") }
+        return videos.filter { v ->
+            val copia = copias[nomeBase(v.nome)]
+            !nomeBase(v.nome).endsWith("_compactado") && copia != null && copia.tamanho in 1 until v.tamanho
+        }
+    }
+
+    private fun moverJaCompactados() {
+        val lista = originaisJaCompactados()
+        if (lista.isEmpty()) return
+        AlertDialog.Builder(this)
+            .setTitle("Mover para a lixeira?")
+            .setMessage("${lista.size} vídeos originais (${formatarTamanho(lista.sumOf { it.tamanho })}) já têm uma cópia compactada. " +
+                    "Eles vão para a lixeira e podem ser restaurados pela aba Lixeira por até 30 dias.")
+            .setPositiveButton("Mover") { _, _ -> pedirTrash(lista.map { it.uri }, paraLixeira = true) }
+            .setNegativeButton("Agora não", null).show()
     }
 
     // ---------- Dados ----------
@@ -300,6 +344,7 @@ class MainActivity : AppCompatActivity() {
         lifecycleScope.launch {
             videos = withContext(Dispatchers.IO) { consultar(lixeira) }
             selecionados.retainAll(videos.map { it.uri }.toSet())
+            jaCompactadosCache = if (lixeira) emptySet() else originaisJaCompactados().map { it.uri }.toSet()
             adaptador.notifyDataSetChanged()
             atualizarCabecalho()
         }
@@ -438,7 +483,12 @@ class MainActivity : AppCompatActivity() {
                 val min = v.duracaoMs / 60000
                 val seg = (v.duracaoMs / 1000) % 60
                 val res = when { minOf(v.largura, v.altura) >= 2000 -> "4K"; minOf(v.largura, v.altura) >= 1000 -> "Full HD"; else -> "${minOf(v.largura, v.altura)}p" }
-                h.detalhe.text = "${formatarTamanho(v.tamanho)} • $res • ${min}min${String.format("%02d", seg)}s\n${v.nome}"
+                val marca = when {
+                    nomeBase(v.nome).endsWith("_compactado") -> "\n✓ Cópia compactada"
+                    v.uri in jaCompactadosCache -> "\n✓ Já compactado (original)"
+                    else -> ""
+                }
+                h.detalhe.text = "${formatarTamanho(v.tamanho)} • $res • ${min}min${String.format("%02d", seg)}s\n${v.nome}$marca"
                 h.barra.visibility = View.GONE
                 h.raiz.setOnClickListener {
                     if (!selecionados.remove(v.uri)) selecionados.add(v.uri)
