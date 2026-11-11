@@ -11,7 +11,10 @@ import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
 import android.view.WindowManager
+import android.graphics.Bitmap
+import android.util.Size
 import android.widget.CheckBox
+import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ProgressBar
 import android.widget.RadioButton
@@ -44,7 +47,7 @@ class MainActivity : AppCompatActivity() {
 
     private lateinit var abas: MaterialButtonToggleGroup
     private lateinit var resumo: TextView
-    private lateinit var qualidadeGrupo: RadioGroup
+    private lateinit var qualidadeGrupo: LinearLayout
     private lateinit var botaoTodos: MaterialButton
     private lateinit var botaoPrincipal: MaterialButton
     private lateinit var lista: RecyclerView
@@ -66,7 +69,6 @@ class MainActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        supportActionBar?.title = "Compactador de Vídeos"
         construirTela()
 
         lifecycleScope.launch {
@@ -97,9 +99,16 @@ class MainActivity : AppCompatActivity() {
         }
         ViewCompat.setOnApplyWindowInsetsListener(raiz) { v, insets ->
             val b = insets.getInsets(WindowInsetsCompat.Type.systemBars())
-            v.setPadding(dp(16), dp(8), dp(16), dp(8) + b.bottom)
+            v.setPadding(dp(16), dp(8) + b.top, dp(16), dp(8) + b.bottom)
             insets
         }
+
+        raiz.addView(TextView(this).apply {
+            text = "Compactador de Vídeos"
+            textSize = 22f
+            setTypeface(typeface, Typeface.BOLD)
+            setPadding(0, dp(4), 0, dp(10))
+        })
 
         abas = MaterialButtonToggleGroup(this).apply {
             isSingleSelection = true
@@ -118,17 +127,24 @@ class MainActivity : AppCompatActivity() {
         }
         raiz.addView(abas, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
 
-        resumo = TextView(this).apply { textSize = 15f; setPadding(0, dp(8), 0, dp(4)) }
+        resumo = TextView(this).apply { textSize = 14f; setPadding(0, dp(8), 0, dp(4)) }
         raiz.addView(resumo)
 
-        qualidadeGrupo = RadioGroup(this).apply { orientation = RadioGroup.VERTICAL }
+        qualidadeGrupo = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        qualidadeGrupo.addView(TextView(this).apply { text = "Qualidade"; textSize = 13f; setPadding(0, dp(4), 0, dp(2)) })
+        val grupoQ = MaterialButtonToggleGroup(this).apply { isSingleSelection = true; isSelectionRequired = true }
+        val nomesCurtos = mapOf(Qualidade.ALTA to "Alta", Qualidade.EQUILIBRADA to "Média", Qualidade.ECONOMIA to "Economia")
         Qualidade.entries.forEach { q ->
-            qualidadeGrupo.addView(RadioButton(this).apply {
-                id = View.generateViewId(); text = q.rotulo; tag = q
-                isChecked = q == Fila.qualidade
-                setOnClickListener { Fila.qualidade = q }
-            })
+            val b = MaterialButton(this, null, com.google.android.material.R.attr.materialButtonOutlinedStyle).apply {
+                id = View.generateViewId(); text = nomesCurtos[q]; tag = q
+            }
+            grupoQ.addView(b, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+            if (q == Fila.qualidade) grupoQ.check(b.id)
         }
+        grupoQ.addOnButtonCheckedListener { g, id, marcado ->
+            if (marcado) Fila.qualidade = g.findViewById<View>(id).tag as Qualidade
+        }
+        qualidadeGrupo.addView(grupoQ, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
         raiz.addView(qualidadeGrupo)
 
         val linhaBotoes = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
@@ -136,7 +152,7 @@ class MainActivity : AppCompatActivity() {
         botaoPrincipal = MaterialButton(this)
         linhaBotoes.addView(botaoTodos, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { marginEnd = dp(8) })
         linhaBotoes.addView(botaoPrincipal, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1.4f))
-        raiz.addView(linhaBotoes)
+        raiz.addView(linhaBotoes, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(6) })
 
         botaoTodos.setOnClickListener { acaoSecundaria() }
         botaoPrincipal.setOnClickListener { acaoPrincipal() }
@@ -165,7 +181,7 @@ class MainActivity : AppCompatActivity() {
             Modo.VIDEOS -> {
                 val total = videos.filter { it.uri in selecionados }.sumOf { it.tamanho }
                 resumo.text = "${videos.size} vídeos na galeria • ${selecionados.size} selecionados (${formatarTamanho(total)})"
-                botaoTodos.text = if (selecionados.size == videos.size && videos.isNotEmpty()) "Limpar" else "Selecionar todos"
+                botaoTodos.text = if (selecionados.size == videos.size && videos.isNotEmpty()) "Limpar" else "Todos"
                 botaoPrincipal.text = "Compactar (${selecionados.size})"
                 botaoPrincipal.isEnabled = selecionados.isNotEmpty()
                 botaoTodos.visibility = View.VISIBLE
@@ -173,7 +189,7 @@ class MainActivity : AppCompatActivity() {
             Modo.LIXEIRA -> {
                 resumo.text = "Originais na lixeira: ficam até 30 dias e depois são apagados pelo Android. " +
                         "${selecionados.size} selecionados."
-                botaoTodos.text = if (selecionados.size == videos.size && videos.isNotEmpty()) "Limpar" else "Selecionar todos"
+                botaoTodos.text = if (selecionados.size == videos.size && videos.isNotEmpty()) "Limpar" else "Todos"
                 botaoPrincipal.text = "Restaurar (${selecionados.size})"
                 botaoPrincipal.isEnabled = selecionados.isNotEmpty()
                 botaoTodos.visibility = View.VISIBLE
@@ -292,10 +308,46 @@ class MainActivity : AppCompatActivity() {
         return saida
     }
 
+    // ---------- Miniaturas ----------
+
+    private val cacheMiniaturas = object : android.util.LruCache<android.net.Uri, Bitmap>(40 * 1024 * 1024) {
+        override fun sizeOf(key: android.net.Uri, value: Bitmap) = value.byteCount
+    }
+
+    private fun carregarMiniatura(img: ImageView, uri: android.net.Uri) {
+        img.tag = uri
+        val emCache = cacheMiniaturas.get(uri)
+        if (emCache != null) { img.setImageBitmap(emCache); return }
+        img.setImageDrawable(null)
+        lifecycleScope.launch {
+            val bmp = withContext(Dispatchers.IO) {
+                try { contentResolver.loadThumbnail(uri, Size(dp(224), dp(126)), null) } catch (_: Exception) { null }
+            }
+            if (bmp != null) {
+                cacheMiniaturas.put(uri, bmp)
+                if (img.tag == uri) img.setImageBitmap(bmp)
+            }
+        }
+    }
+
+    private fun assistir(uri: android.net.Uri) {
+        try {
+            startActivity(Intent(Intent.ACTION_VIEW).setDataAndType(uri, "video/*")
+                .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION))
+        } catch (_: Exception) {
+            Toast.makeText(this, "Não foi possível abrir o vídeo.", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    private val formatoData = java.text.SimpleDateFormat("dd/MM/yyyy 'às' HH:mm", java.util.Locale("pt", "BR"))
+
+    private fun dataLegivel(v: Video) =
+        if (v.dataCaptura > 0) formatoData.format(java.util.Date(v.dataCaptura)) else v.nome
+
     // ---------- Lista ----------
 
     private inner class Adaptador : RecyclerView.Adapter<Adaptador.VH>() {
-        inner class VH(val raiz: LinearLayout, val check: CheckBox, val titulo: TextView,
+        inner class VH(val raiz: LinearLayout, val check: CheckBox, val miniatura: ImageView, val titulo: TextView,
                        val detalhe: TextView, val barra: ProgressBar) : RecyclerView.ViewHolder(raiz)
 
         override fun getItemCount() =
@@ -309,20 +361,34 @@ class MainActivity : AppCompatActivity() {
                 layoutParams = RecyclerView.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
             }
             val check = CheckBox(parent.context).apply { isClickable = false }
+            val miniatura = ImageView(parent.context).apply {
+                scaleType = ImageView.ScaleType.CENTER_CROP
+                setBackgroundColor(0x22888888)
+                clipToOutline = true
+                outlineProvider = object : android.view.ViewOutlineProvider() {
+                    override fun getOutline(view: View, outline: android.graphics.Outline) {
+                        outline.setRoundRect(0, 0, view.width, view.height, dp(8).toFloat())
+                    }
+                }
+            }
             val textos = LinearLayout(parent.context).apply { orientation = LinearLayout.VERTICAL }
             val titulo = TextView(parent.context).apply { textSize = 15f; setTypeface(typeface, Typeface.BOLD); maxLines = 1 }
+            raiz.minimumHeight = dp(80)
             val detalhe = TextView(parent.context).apply { textSize = 13f }
             val barra = ProgressBar(parent.context, null, android.R.attr.progressBarStyleHorizontal).apply { max = 100 }
             textos.addView(titulo); textos.addView(detalhe); textos.addView(barra)
-            raiz.addView(check)
+            raiz.addView(miniatura, LinearLayout.LayoutParams(dp(112), dp(63)).apply { marginEnd = dp(12) })
             raiz.addView(textos, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-            return VH(raiz, check, titulo, detalhe, barra)
+            raiz.addView(check)
+            return VH(raiz, check, miniatura, titulo, detalhe, barra)
         }
 
         override fun onBindViewHolder(h: VH, pos: Int) {
             if (modo == Modo.FILA) {
                 val it = Fila.estado.value.itens[pos]
                 h.check.visibility = View.GONE
+                carregarMiniatura(h.miniatura, it.video.uri)
+                h.miniatura.setOnClickListener(null)
                 h.titulo.text = it.video.nome
                 h.detalhe.text = when (it.situacao) {
                     Situacao.AGUARDANDO -> "Aguardando • ${formatarTamanho(it.video.tamanho)}"
@@ -338,11 +404,13 @@ class MainActivity : AppCompatActivity() {
                 val v = videos[pos]
                 h.check.visibility = View.VISIBLE
                 h.check.isChecked = v.uri in selecionados
-                h.titulo.text = v.nome
+                carregarMiniatura(h.miniatura, v.uri)
+                h.miniatura.setOnClickListener { assistir(v.uri) }
+                h.titulo.text = dataLegivel(v)
                 val min = v.duracaoMs / 60000
                 val seg = (v.duracaoMs / 1000) % 60
                 val res = when { minOf(v.largura, v.altura) >= 2000 -> "4K"; minOf(v.largura, v.altura) >= 1000 -> "Full HD"; else -> "${minOf(v.largura, v.altura)}p" }
-                h.detalhe.text = "${formatarTamanho(v.tamanho)} • $res • ${min}min${String.format("%02d", seg)}s"
+                h.detalhe.text = "${formatarTamanho(v.tamanho)} • $res • ${min}min${String.format("%02d", seg)}s\n${v.nome}"
                 h.barra.visibility = View.GONE
                 h.raiz.setOnClickListener {
                     if (!selecionados.remove(v.uri)) selecionados.add(v.uri)
