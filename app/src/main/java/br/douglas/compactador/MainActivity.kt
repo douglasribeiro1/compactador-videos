@@ -28,7 +28,6 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
 import androidx.core.content.IntentCompat
 import androidx.core.widget.doAfterTextChanged
-import androidx.activity.result.PickVisualMediaRequest
 import android.content.ClipData
 import android.net.Uri
 import android.provider.OpenableColumns
@@ -76,12 +75,11 @@ class MainActivity : AppCompatActivity() {
     private val selecionados = mutableSetOf<android.net.Uri>()
     private var jaCompactadosCache: Set<android.net.Uri> = emptySet()
 
-    private lateinit var abas: MaterialButtonToggleGroup
+    private lateinit var titulo: TextView
+    private lateinit var botaoLixeira: MaterialButton
+    private lateinit var botaoGaleria: MaterialButton
     private lateinit var resumo: TextView
-    private lateinit var qualidadeGrupo: LinearLayout
-    private lateinit var resolucaoGrupo: LinearLayout
     private lateinit var modulos: MaterialButtonToggleGroup
-    private lateinit var abaVideos: MaterialButton
     private lateinit var botaoTodos: MaterialButton
     private lateinit var botaoPrincipal: MaterialButton
     private lateinit var botaoApagar: MaterialButton
@@ -94,9 +92,17 @@ class MainActivity : AppCompatActivity() {
     private lateinit var avisoEscolhidos: TextView
     private val preferencias by lazy { getSharedPreferences("preferencias", MODE_PRIVATE) }
 
+    /** Abre o app de galeria que a pessoa escolher (Galeria, Google Fotos…). */
     private val escolherNaGaleria = registerForActivityResult(
-        ActivityResultContracts.PickMultipleVisualMedia(500)
-    ) { uris -> if (uris.isNotEmpty()) abrirEscolhidos(uris) }
+        ActivityResultContracts.StartActivityForResult()
+    ) { r ->
+        val d = r.data ?: return@registerForActivityResult
+        if (r.resultCode != RESULT_OK) return@registerForActivityResult
+        val uris = mutableListOf<Uri>()
+        d.clipData?.let { c -> for (i in 0 until c.itemCount) c.getItemAt(i).uri?.let(uris::add) }
+        if (uris.isEmpty()) d.data?.let(uris::add)
+        if (uris.isNotEmpty()) abrirEscolhidos(uris)
+    }
     private val adaptador = Adaptador()
 
     private val pedirPermissoes = registerForActivityResult(
@@ -116,6 +122,8 @@ class MainActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         ordem = runCatching { Ordem.valueOf(preferencias.getString("ordem", null)!!) }.getOrDefault(Ordem.MAIORES)
+        runCatching { Fila.qualidade = Qualidade.valueOf(preferencias.getString("qualidade", null)!!) }
+        runCatching { Fila.resolucao = Resolucao.valueOf(preferencias.getString("resolucao", null)!!) }
         construirTela()
 
         lifecycleScope.launch {
@@ -170,18 +178,31 @@ class MainActivity : AppCompatActivity() {
             insets
         }
 
-        raiz.addView(TextView(this).apply {
-            text = "Compactador de Mídias"
-            textSize = 22f
-            setTypeface(typeface, Typeface.BOLD)
-            setPadding(0, dp(4), 0, dp(10))
-        })
+        // ---- Topo: título + botão da Lixeira ----
+        val topo = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
+        titulo = TextView(this).apply {
+            text = "Compactador de Mídias"; textSize = 19f; setTypeface(typeface, Typeface.BOLD); maxLines = 1
+        }
+        botaoLixeira = MaterialButton(this, null, com.google.android.material.R.attr.materialButtonOutlinedStyle).apply {
+            textSize = 12f; insetTop = 0; insetBottom = 0; minHeight = dp(36); minimumHeight = dp(36)
+            setPadding(dp(12), 0, dp(12), 0)
+            setOnClickListener {
+                if (Fila.emAndamento) return@setOnClickListener
+                mudarModo(if (modo == Modo.LIXEIRA) Modo.VIDEOS else Modo.LIXEIRA)
+            }
+        }
+        topo.addView(titulo, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        topo.addView(botaoLixeira, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(36)))
+        raiz.addView(topo, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(8) })
 
         // Módulos: cada motor de compactação é um módulo do app.
         modulos = MaterialButtonToggleGroup(this).apply { isSingleSelection = true; isSelectionRequired = true }
         Modulo.entries.forEach { m ->
-            val b = MaterialButton(this).apply { id = View.generateViewId(); text = m.rotulo; tag = m }
-            modulos.addView(b, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+            val b = MaterialButton(this, null, com.google.android.material.R.attr.materialButtonOutlinedStyle).apply {
+                id = View.generateViewId(); text = m.rotulo; tag = m
+                insetTop = 0; insetBottom = 0; minHeight = dp(40); minimumHeight = dp(40)
+            }
+            modulos.addView(b, LinearLayout.LayoutParams(0, dp(40), 1f))
             if (m == modulo) modulos.check(b.id)
         }
         modulos.addOnButtonCheckedListener { g, id, marcado ->
@@ -195,110 +216,48 @@ class MainActivity : AppCompatActivity() {
             adaptador.notifyDataSetChanged()
             mudarModo(modo)
         }
-        raiz.addView(modulos, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(4) })
+        raiz.addView(modulos, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(6) })
 
-        abas = MaterialButtonToggleGroup(this).apply {
-            isSingleSelection = true
-            isSelectionRequired = true
-        }
-        abaVideos = MaterialButton(this, null, com.google.android.material.R.attr.materialButtonOutlinedStyle)
-            .apply { id = View.generateViewId(); text = "Galeria" }
-        val abaLixeira = MaterialButton(this, null, com.google.android.material.R.attr.materialButtonOutlinedStyle)
-            .apply { id = View.generateViewId(); text = "Lixeira" }
-        abas.addView(abaVideos, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-        abas.addView(abaLixeira, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-        abas.check(abaVideos.id)
-        abas.addOnButtonCheckedListener { _, id, marcado ->
-            if (!marcado || Fila.emAndamento || ignorarCliques) return@addOnButtonCheckedListener
-            mudarModo(if (id == abaLixeira.id) Modo.LIXEIRA else Modo.VIDEOS)
-        }
-        raiz.addView(abas, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
-
-        resumo = TextView(this).apply { textSize = 14f; setPadding(0, dp(8), 0, dp(4)) }
-        raiz.addView(resumo)
-
-        qualidadeGrupo = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        qualidadeGrupo.addView(TextView(this).apply { text = "Qualidade"; textSize = 13f; setPadding(0, dp(4), 0, dp(2)) })
-        val grupoQ = MaterialButtonToggleGroup(this).apply { isSingleSelection = true; isSelectionRequired = true }
-        val nomesCurtos = mapOf(Qualidade.ALTA to "Alta", Qualidade.EQUILIBRADA to "Média", Qualidade.ECONOMIA to "Economia")
-        Qualidade.entries.forEach { q ->
-            val b = MaterialButton(this, null, com.google.android.material.R.attr.materialButtonOutlinedStyle).apply {
-                id = View.generateViewId(); text = nomesCurtos[q]; tag = q
-            }
-            grupoQ.addView(b, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-            if (q == Fila.qualidade) grupoQ.check(b.id)
-        }
-        grupoQ.addOnButtonCheckedListener { g, id, marcado ->
-            if (marcado) Fila.qualidade = g.findViewById<View>(id).tag as Qualidade
-        }
-        qualidadeGrupo.addView(grupoQ, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
-        raiz.addView(qualidadeGrupo)
-
-        resolucaoGrupo = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        resolucaoGrupo.addView(TextView(this).apply {
-            text = "Resolução (de cada lado)"; textSize = 13f; setPadding(0, dp(4), 0, dp(2))
-        })
-        val grupoR = MaterialButtonToggleGroup(this).apply { isSingleSelection = true; isSelectionRequired = true }
-        Resolucao.entries.forEach { r ->
-            val b = MaterialButton(this, null, com.google.android.material.R.attr.materialButtonOutlinedStyle).apply {
-                id = View.generateViewId(); text = r.rotulo; tag = r
-            }
-            grupoR.addView(b, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-            if (r == Fila.resolucao) grupoR.check(b.id)
-        }
-        grupoR.addOnButtonCheckedListener { g, id, marcado ->
-            if (marcado) Fila.resolucao = g.findViewById<View>(id).tag as Resolucao
-        }
-        resolucaoGrupo.addView(grupoR, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
-        raiz.addView(resolucaoGrupo)
-
-        // ---- Localizar: ordem, álbum, data, busca e seletor do Android ----
-        filtrosGrupo = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(0, dp(6), 0, 0) }
+        // ---- Localizar: busca + galeria; ordem, álbum, data ----
+        filtrosGrupo = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         fun botaoPequeno() = MaterialButton(this, null, com.google.android.material.R.attr.materialButtonOutlinedStyle).apply {
             textSize = 12f; maxLines = 1; ellipsize = TextUtils.TruncateAt.END
-            setPadding(dp(6), 0, dp(6), 0); insetTop = 0; insetBottom = 0; minHeight = dp(40)
+            setPadding(dp(8), 0, dp(8), 0); insetTop = 0; insetBottom = 0; minHeight = dp(34); minimumHeight = dp(34)
         }
-        val linhaF = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        botaoOrdem = botaoPequeno().apply { setOnClickListener { escolherOrdem() } }
-        botaoAlbum = botaoPequeno().apply { setOnClickListener { escolherAlbum() } }
-        botaoData = botaoPequeno().apply { setOnClickListener { escolherPeriodo() } }
-        listOf(botaoOrdem, botaoAlbum, botaoData).forEachIndexed { i, b ->
-            linhaF.addView(b, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { if (i < 2) marginEnd = dp(6) })
-        }
-        filtrosGrupo.addView(linhaF)
         val linhaBusca = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
         campoBusca = EditText(this).apply {
-            hint = "Buscar por nome ou álbum"; textSize = 14f; isSingleLine = true
+            hint = "🔍 Buscar por nome ou álbum"; textSize = 14f; isSingleLine = true
+            setPadding(dp(4), dp(6), dp(4), dp(6))
             imeOptions = EditorInfo.IME_ACTION_SEARCH
             doAfterTextChanged { busca = it?.toString() ?: ""; if (modo != Modo.FILA) aplicarFiltros() }
             setOnEditorActionListener { v, _, _ ->
                 getSystemService(InputMethodManager::class.java).hideSoftInputFromWindow(v.windowToken, 0); v.clearFocus(); true
             }
         }
-        val botaoGaleria = botaoPequeno().apply {
-            text = "Escolher na galeria"
-            setOnClickListener {
-                val tipo = if (modulo == Modulo.IMAGENS) ActivityResultContracts.PickVisualMedia.ImageOnly
-                else ActivityResultContracts.PickVisualMedia.VideoOnly
-                escolherNaGaleria.launch(PickVisualMediaRequest(tipo))
-            }
+        botaoGaleria = botaoPequeno().apply {
+            text = "Galeria"
+            setOnClickListener { abrirGaleria() }
         }
         linhaBusca.addView(campoBusca, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { marginEnd = dp(6) })
-        linhaBusca.addView(botaoGaleria, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+        linhaBusca.addView(botaoGaleria, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(34)))
         filtrosGrupo.addView(linhaBusca)
+        val linhaF = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; setPadding(0, dp(4), 0, 0) }
+        botaoOrdem = botaoPequeno().apply { setOnClickListener { escolherOrdem() } }
+        botaoAlbum = botaoPequeno().apply { setOnClickListener { escolherAlbum() } }
+        botaoData = botaoPequeno().apply { setOnClickListener { escolherPeriodo() } }
+        listOf(botaoOrdem, botaoAlbum, botaoData).forEachIndexed { i, b ->
+            linhaF.addView(b, LinearLayout.LayoutParams(0, dp(34), 1f).apply { if (i < 2) marginEnd = dp(6) })
+        }
+        filtrosGrupo.addView(linhaF)
         avisoEscolhidos = TextView(this).apply {
-            textSize = 13f; setTextColor(0xFF1E6FD9.toInt()); setPadding(0, dp(4), 0, dp(2)); visibility = View.GONE
+            textSize = 13f; setTextColor(0xFF1E6FD9.toInt()); setPadding(0, dp(4), 0, 0); visibility = View.GONE
             setOnClickListener { escolhidos = null; aplicarFiltros() }
         }
         filtrosGrupo.addView(avisoEscolhidos)
         raiz.addView(filtrosGrupo)
 
-        val linhaBotoes = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        botaoTodos = MaterialButton(this, null, com.google.android.material.R.attr.materialButtonOutlinedStyle)
-        botaoPrincipal = MaterialButton(this)
-        linhaBotoes.addView(botaoTodos, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { marginEnd = dp(8) })
-        linhaBotoes.addView(botaoPrincipal, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1.4f))
-        raiz.addView(linhaBotoes, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(6) })
+        resumo = TextView(this).apply { textSize = 13f; setPadding(0, dp(6), 0, dp(2)); alpha = 0.8f }
+        raiz.addView(resumo)
 
         botaoApagar = MaterialButton(this, null, com.google.android.material.R.attr.materialButtonOutlinedStyle).apply {
             setTextColor(0xFFD32F2F.toInt())
@@ -323,14 +282,21 @@ class MainActivity : AppCompatActivity() {
         }
         raiz.addView(botaoApagar, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
 
-        botaoTodos.setOnClickListener { acaoSecundaria() }
-        botaoPrincipal.setOnClickListener { acaoPrincipal() }
-
         lista = RecyclerView(this).apply {
             layoutManager = LinearLayoutManager(this@MainActivity)
             adapter = adaptador
         }
         raiz.addView(lista, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
+
+        // ---- Rodapé fixo (ao alcance do polegar): Marcar todos | Compactar ----
+        val linhaBotoes = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        botaoTodos = MaterialButton(this, null, com.google.android.material.R.attr.materialButtonOutlinedStyle)
+        botaoPrincipal = MaterialButton(this)
+        linhaBotoes.addView(botaoTodos, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { marginEnd = dp(8) })
+        linhaBotoes.addView(botaoPrincipal, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1.4f))
+        raiz.addView(linhaBotoes, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(4) })
+        botaoTodos.setOnClickListener { acaoSecundaria() }
+        botaoPrincipal.setOnClickListener { acaoPrincipal() }
         setContentView(raiz)
     }
 
@@ -345,9 +311,13 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun atualizarCabecalho() {
-        qualidadeGrupo.visibility = if (modo == Modo.VIDEOS) View.VISIBLE else View.GONE
-        resolucaoGrupo.visibility = if (modo == Modo.VIDEOS && modulo == Modulo.IMAGENS) View.VISIBLE else View.GONE
-        abas.visibility = if (modo == Modo.FILA) View.GONE else View.VISIBLE
+        botaoLixeira.visibility = if (modo == Modo.FILA) View.GONE else View.VISIBLE
+        botaoLixeira.text = if (modo == Modo.LIXEIRA) "← Galeria" else "🗑 Lixeira"
+        titulo.text = when (modo) {
+            Modo.LIXEIRA -> "Lixeira"
+            Modo.FILA -> "Compactando"
+            else -> "Compactador de Mídias"
+        }
         modulos.visibility = if (modo == Modo.FILA) View.GONE else View.VISIBLE
         filtrosGrupo.visibility = if (modo == Modo.FILA) View.GONE else View.VISIBLE
         botaoOrdem.text = "↕ ${ordem.rotulo}"
@@ -377,8 +347,7 @@ class MainActivity : AppCompatActivity() {
         when (modo) {
             Modo.VIDEOS -> {
                 val total = todos.filter { it.uri in selecionados }.sumOf { it.tamanho }
-                resumo.text = "$prefixo${todos.size} $palavra • ${selecionados.size} selecionados (${formatarTamanho(total)})" +
-                        if (modulo == Modulo.IMAGENS) "\nTudo é salvo em JPEG (HEIC, PNG, WebP… são convertidos)." else ""
+                resumo.text = "$prefixo${todos.size} $palavra • ${selecionados.size} selecionados (${formatarTamanho(total)})"
                 botaoTodos.text = if (visiveisMarcados) "Limpar" else "Marcar todos"
                 botaoPrincipal.text = "Compactar (${selecionados.size})"
                 botaoPrincipal.isEnabled = selecionados.isNotEmpty()
@@ -425,7 +394,6 @@ class MainActivity : AppCompatActivity() {
     private fun acaoSecundaria() {
         if (modo == Modo.FILA) {
             Fila.nova(emptyList())
-            abas.check(abaVideos.id)
             mudarModo(Modo.VIDEOS)
             return
         }
@@ -439,10 +407,7 @@ class MainActivity : AppCompatActivity() {
     private fun acaoPrincipal() {
         when (modo) {
             Modo.VIDEOS -> {
-                Fila.nova(todos.filter { it.uri in selecionados })
-                modo = Modo.FILA
-                ContextCompat.startForegroundService(this, Intent(this, CompressService::class.java))
-                atualizarCabecalho()
+                mostrarOpcoes()
             }
             Modo.LIXEIRA -> pedirTrash(selecionados.toList(), paraLixeira = false)
             Modo.FILA -> {
@@ -607,7 +572,6 @@ class MainActivity : AppCompatActivity() {
                 val b = modulos.getChildAt(k)
                 if (b.tag == m) modulos.check(b.id)
             }
-            abas.check(abaVideos.id)
             ignorarCliques = false
             modo = Modo.VIDEOS
             album = null
@@ -619,6 +583,87 @@ class MainActivity : AppCompatActivity() {
             jaCompactadosCache = originaisJaCompactados().map { it.uri }.toSet()
             aplicarFiltros()
         }
+    }
+
+    private fun abrirGaleria() {
+        val colecao = if (modulo == Modulo.IMAGENS) MediaStore.Images.Media.EXTERNAL_CONTENT_URI
+        else MediaStore.Video.Media.EXTERNAL_CONTENT_URI
+        val pedido = Intent(Intent.ACTION_PICK, colecao)
+            .setType(if (modulo == Modulo.IMAGENS) "image/*" else "video/*")
+            .putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true)
+        try {
+            escolherNaGaleria.launch(Intent.createChooser(pedido, "Escolher $palavra com"))
+        } catch (_: Exception) {
+            Toast.makeText(this, "Nenhum app de galeria encontrado.", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    /** Painel que sobe de baixo, como nos apps profissionais: opções só na hora de compactar. */
+    private fun mostrarOpcoes() {
+        val escolha = todos.filter { it.uri in selecionados }
+        if (escolha.isEmpty()) return
+        val painel = com.google.android.material.bottomsheet.BottomSheetDialog(this)
+        val corpo = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(20), dp(16), dp(20), dp(24)) }
+        corpo.addView(TextView(this).apply {
+            text = "Compactar ${escolha.size} ${if (escolha.size > 1) palavra else if (modulo == Modulo.IMAGENS) "imagem" else "vídeo"}"
+            textSize = 18f; setTypeface(typeface, Typeface.BOLD)
+        })
+        corpo.addView(TextView(this).apply {
+            text = "${formatarTamanho(escolha.sumOf { it.tamanho })} selecionados" +
+                    if (modulo == Modulo.IMAGENS) " • tudo será salvo em JPEG" else " • H.265, mesma resolução"
+            textSize = 13f; alpha = 0.75f; setPadding(0, dp(2), 0, dp(12))
+        })
+        fun rotulo(t: String) = TextView(this).apply { text = t; textSize = 13f; setPadding(0, dp(8), 0, dp(4)) }
+        fun <T> grupo(itens: List<T>, nome: (T) -> String, atual: T, aoEscolher: (T) -> Unit) =
+            MaterialButtonToggleGroup(this).apply {
+                isSingleSelection = true; isSelectionRequired = true
+                itens.forEach { x ->
+                    val b = MaterialButton(this@MainActivity, null, com.google.android.material.R.attr.materialButtonOutlinedStyle).apply {
+                        id = View.generateViewId(); text = nome(x); tag = x; textSize = 13f
+                        setPadding(dp(4), 0, dp(4), 0)
+                    }
+                    addView(b, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+                    if (x == atual) check(b.id)
+                }
+                @Suppress("UNCHECKED_CAST")
+                addOnButtonCheckedListener { g, id, marcado -> if (marcado) aoEscolher(g.findViewById<View>(id).tag as T) }
+            }
+        val explicaQ = TextView(this).apply { textSize = 12f; alpha = 0.7f }
+        fun atualizarExplicacao() {
+            explicaQ.text = when (Fila.qualidade) {
+                Qualidade.ALTA -> "Visualmente idêntico ao original."
+                Qualidade.EQUILIBRADA -> "Boa qualidade, arquivo bem menor."
+                Qualidade.ECONOMIA -> "O menor arquivo possível; ideal para enviar e formulários."
+            }
+        }
+        atualizarExplicacao()
+        corpo.addView(rotulo("Qualidade"))
+        corpo.addView(grupo(Qualidade.entries, { mapOf(Qualidade.ALTA to "Alta", Qualidade.EQUILIBRADA to "Média", Qualidade.ECONOMIA to "Economia")[it]!! }, Fila.qualidade) {
+            Fila.qualidade = it; preferencias.edit().putString("qualidade", it.name).apply(); atualizarExplicacao()
+        }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+        corpo.addView(explicaQ)
+        if (modulo == Modulo.IMAGENS) {
+            corpo.addView(rotulo("Resolução (de cada lado)"))
+            corpo.addView(grupo(Resolucao.entries, { it.rotulo }, Fila.resolucao) {
+                Fila.resolucao = it; preferencias.edit().putString("resolucao", it.name).apply()
+            }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+            corpo.addView(TextView(this).apply {
+                text = "50% de cada lado ≈ 1/4 dos pixels. Para formulários e WhatsApp, 50% costuma bastar."
+                textSize = 12f; alpha = 0.7f
+            })
+        }
+        corpo.addView(MaterialButton(this).apply {
+            text = "Iniciar"
+            setOnClickListener {
+                painel.dismiss()
+                Fila.nova(escolha)
+                modo = Modo.FILA
+                ContextCompat.startForegroundService(this@MainActivity, Intent(this@MainActivity, CompressService::class.java))
+                atualizarCabecalho()
+            }
+        }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(16) })
+        painel.setContentView(corpo)
+        painel.show()
     }
 
     private fun localizar(u: Uri, lista: List<Video>): Video? {
