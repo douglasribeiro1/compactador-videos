@@ -81,6 +81,7 @@ class CompressService : Service() {
         item.situacao = Situacao.PROCESSANDO
         item.progresso = 0
         Fila.atualizar()
+        if (v.imagem) return processarImagem(item)
 
         // Bitrate de destino a partir do original
         val ret = MediaMetadataRetriever()
@@ -135,7 +136,7 @@ class CompressService : Service() {
                 override fun onCompleted(composition: Composition, exportResult: ExportResult) {
                     handler.removeCallbacksAndMessages(null)
                     transformer = null
-                    salvarResultado(item, temp)
+                    salvarResultado(item, temp, imagem = false)
                 }
 
                 override fun onError(
@@ -160,6 +161,30 @@ class CompressService : Service() {
         acompanharProgresso(item)
     }
 
+    /** Converte a foto para JPEG (com a qualidade e a resolução escolhidas) fora da thread principal. */
+    private fun processarImagem(item: ItemFila) {
+        item.mensagem = "Convertendo para JPEG…"
+        item.progresso = 30
+        Fila.atualizar()
+        atualizarNotificacao("Imagem ${Fila.atual + 1} de ${Fila.itens.size}", (Fila.atual * 100) / maxOf(Fila.itens.size, 1))
+        val q = Fila.qualidade
+        val r = Fila.resolucao
+        thread {
+            val temp = try {
+                ImageCompressor.comprimir(this, item.video, q, r)
+            } catch (e: Throwable) {
+                item.situacao = Situacao.ERRO
+                item.mensagem = if (e is OutOfMemoryError) "Imagem grande demais; tente reduzir a resolução"
+                else "Falha ao converter: ${e.message ?: e.javaClass.simpleName}"
+                null
+            }
+            handler.post {
+                if (Fila.cancelado) { temp?.delete(); return@post }
+                if (temp == null) { Fila.atualizar(); proximo() } else salvarResultado(item, temp, imagem = true)
+            }
+        }
+    }
+
     private fun acompanharProgresso(item: ItemFila) {
         val holder = ProgressHolder()
         val r = object : Runnable {
@@ -177,26 +202,35 @@ class CompressService : Service() {
     }
 
     /** Copia o resultado para a galeria, mantendo pasta e data de captura. Roda fora da thread principal. */
-    private fun salvarResultado(item: ItemFila, temp: File) {
+    private fun salvarResultado(item: ItemFila, temp: File, imagem: Boolean) {
         item.mensagem = "Salvando…"
         Fila.atualizar()
         thread {
             val v = item.video
             try {
-                if (temp.length() >= v.tamanho) {
+                // Fotos em outro formato (HEIC, PNG…) são sempre convertidas; JPEG e vídeo só se ficarem menores.
+                val precisaConverter = imagem && v.mime != "image/jpeg"
+                if (!precisaConverter && temp.length() >= v.tamanho) {
                     temp.delete()
                     item.situacao = Situacao.PULADO
                     item.mensagem = "Não ficou menor"
                 } else {
                     val nomeBase = v.nome.substringBeforeLast('.')
                     val valores = ContentValues().apply {
-                        put(MediaStore.Video.Media.DISPLAY_NAME, "${nomeBase}_compactado.mp4")
-                        put(MediaStore.Video.Media.MIME_TYPE, "video/mp4")
-                        put(MediaStore.Video.Media.RELATIVE_PATH, v.pasta ?: "Movies/Compactados/")
-                        if (v.dataCaptura > 0) put(MediaStore.Video.Media.DATE_TAKEN, v.dataCaptura)
-                        put(MediaStore.Video.Media.IS_PENDING, 1)
+                        if (imagem) {
+                            put(MediaStore.MediaColumns.DISPLAY_NAME, "${nomeBase}_compactado.jpg")
+                            put(MediaStore.MediaColumns.MIME_TYPE, "image/jpeg")
+                            put(MediaStore.MediaColumns.RELATIVE_PATH, v.pasta ?: "Pictures/Compactadas/")
+                        } else {
+                            put(MediaStore.MediaColumns.DISPLAY_NAME, "${nomeBase}_compactado.mp4")
+                            put(MediaStore.MediaColumns.MIME_TYPE, "video/mp4")
+                            put(MediaStore.MediaColumns.RELATIVE_PATH, v.pasta ?: "Movies/Compactados/")
+                        }
+                        if (v.dataCaptura > 0) put(MediaStore.MediaColumns.DATE_TAKEN, v.dataCaptura)
+                        put(MediaStore.MediaColumns.IS_PENDING, 1)
                     }
-                    val colecao = MediaStore.Video.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
+                    val colecao = if (imagem) MediaStore.Images.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
+                    else MediaStore.Video.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
                     val novo = contentResolver.insert(colecao, valores)
                         ?: throw IllegalStateException("não foi possível criar o arquivo")
                     try {
@@ -204,8 +238,8 @@ class CompressService : Service() {
                             temp.inputStream().use { it.copyTo(out, 1 shl 20) }
                         }
                         contentResolver.update(novo, ContentValues().apply {
-                            put(MediaStore.Video.Media.IS_PENDING, 0)
-                            if (v.dataCaptura > 0) put(MediaStore.Video.Media.DATE_TAKEN, v.dataCaptura)
+                            put(MediaStore.MediaColumns.IS_PENDING, 0)
+                            if (v.dataCaptura > 0) put(MediaStore.MediaColumns.DATE_TAKEN, v.dataCaptura)
                         }, null, null)
                     } catch (e: Exception) {
                         contentResolver.delete(novo, null, null)
@@ -259,7 +293,7 @@ class CompressService : Service() {
             NotificationCompat.Builder(this, CANAL)
                 .setSmallIcon(android.R.drawable.stat_sys_download_done)
                 .setContentTitle("Compactação concluída")
-                .setContentText("${e.concluidos.size} vídeos • economia de ${formatarTamanho(e.economia)}")
+                .setContentText("${e.concluidos.size} arquivos • economia de ${formatarTamanho(e.economia)}")
                 .setContentIntent(abrirApp())
                 .setAutoCancel(true)
                 .build()
@@ -275,7 +309,7 @@ class CompressService : Service() {
     private fun criarCanal() {
         val nm = getSystemService(NotificationManager::class.java)
         nm.createNotificationChannel(
-            NotificationChannel(CANAL, "Compactação de vídeos", NotificationManager.IMPORTANCE_LOW)
+            NotificationChannel(CANAL, "Compactação de mídias", NotificationManager.IMPORTANCE_LOW)
         )
     }
 
@@ -286,7 +320,7 @@ class CompressService : Service() {
         )
         return NotificationCompat.Builder(this, CANAL)
             .setSmallIcon(android.R.drawable.stat_sys_download)
-            .setContentTitle("Compactando vídeos")
+            .setContentTitle("Compactando mídias")
             .setContentText(texto)
             .setProgress(100, progresso, false)
             .setOngoing(true)

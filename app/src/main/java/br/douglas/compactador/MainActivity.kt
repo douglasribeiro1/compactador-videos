@@ -42,6 +42,8 @@ class MainActivity : AppCompatActivity() {
     private enum class Modo { VIDEOS, FILA, LIXEIRA }
 
     private var modo = Modo.VIDEOS
+    private var modulo = Modulo.VIDEOS
+    private val palavra get() = if (modulo == Modulo.IMAGENS) "imagens" else "vídeos"
     private var videos: List<Video> = emptyList()
     private val selecionados = mutableSetOf<android.net.Uri>()
     private var jaCompactadosCache: Set<android.net.Uri> = emptySet()
@@ -49,6 +51,9 @@ class MainActivity : AppCompatActivity() {
     private lateinit var abas: MaterialButtonToggleGroup
     private lateinit var resumo: TextView
     private lateinit var qualidadeGrupo: LinearLayout
+    private lateinit var resolucaoGrupo: LinearLayout
+    private lateinit var modulos: MaterialButtonToggleGroup
+    private lateinit var abaVideos: MaterialButton
     private lateinit var botaoTodos: MaterialButton
     private lateinit var botaoPrincipal: MaterialButton
     private lateinit var botaoApagar: MaterialButton
@@ -85,7 +90,10 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
-        val faltando = listOf(Manifest.permission.READ_MEDIA_VIDEO, Manifest.permission.POST_NOTIFICATIONS)
+        val faltando = listOf(
+            Manifest.permission.READ_MEDIA_VIDEO, Manifest.permission.READ_MEDIA_IMAGES,
+            Manifest.permission.ACCESS_MEDIA_LOCATION, Manifest.permission.POST_NOTIFICATIONS,
+        )
             .filter { ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED }
         if (faltando.isEmpty()) carregar() else pedirPermissoes.launch(faltando.toTypedArray())
     }
@@ -106,18 +114,36 @@ class MainActivity : AppCompatActivity() {
         }
 
         raiz.addView(TextView(this).apply {
-            text = "Compactador de Vídeos"
+            text = "Compactador de Mídias"
             textSize = 22f
             setTypeface(typeface, Typeface.BOLD)
             setPadding(0, dp(4), 0, dp(10))
         })
 
+        // Módulos: cada motor de compactação é um módulo do app.
+        modulos = MaterialButtonToggleGroup(this).apply { isSingleSelection = true; isSelectionRequired = true }
+        Modulo.entries.forEach { m ->
+            val b = MaterialButton(this).apply { id = View.generateViewId(); text = m.rotulo; tag = m }
+            modulos.addView(b, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+            if (m == modulo) modulos.check(b.id)
+        }
+        modulos.addOnButtonCheckedListener { g, id, marcado ->
+            if (!marcado || Fila.emAndamento) return@addOnButtonCheckedListener
+            val m = g.findViewById<View>(id).tag as Modulo
+            if (m == modulo) return@addOnButtonCheckedListener
+            modulo = m
+            videos = emptyList()
+            adaptador.notifyDataSetChanged()
+            mudarModo(modo)
+        }
+        raiz.addView(modulos, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(4) })
+
         abas = MaterialButtonToggleGroup(this).apply {
             isSingleSelection = true
             isSelectionRequired = true
         }
-        val abaVideos = MaterialButton(this, null, com.google.android.material.R.attr.materialButtonOutlinedStyle)
-            .apply { id = View.generateViewId(); text = "Vídeos" }
+        abaVideos = MaterialButton(this, null, com.google.android.material.R.attr.materialButtonOutlinedStyle)
+            .apply { id = View.generateViewId(); text = "Galeria" }
         val abaLixeira = MaterialButton(this, null, com.google.android.material.R.attr.materialButtonOutlinedStyle)
             .apply { id = View.generateViewId(); text = "Lixeira" }
         abas.addView(abaVideos, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
@@ -149,6 +175,24 @@ class MainActivity : AppCompatActivity() {
         qualidadeGrupo.addView(grupoQ, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
         raiz.addView(qualidadeGrupo)
 
+        resolucaoGrupo = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        resolucaoGrupo.addView(TextView(this).apply {
+            text = "Resolução (de cada lado)"; textSize = 13f; setPadding(0, dp(4), 0, dp(2))
+        })
+        val grupoR = MaterialButtonToggleGroup(this).apply { isSingleSelection = true; isSelectionRequired = true }
+        Resolucao.entries.forEach { r ->
+            val b = MaterialButton(this, null, com.google.android.material.R.attr.materialButtonOutlinedStyle).apply {
+                id = View.generateViewId(); text = r.rotulo; tag = r
+            }
+            grupoR.addView(b, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+            if (r == Fila.resolucao) grupoR.check(b.id)
+        }
+        grupoR.addOnButtonCheckedListener { g, id, marcado ->
+            if (marcado) Fila.resolucao = g.findViewById<View>(id).tag as Resolucao
+        }
+        resolucaoGrupo.addView(grupoR, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+        raiz.addView(resolucaoGrupo)
+
         val linhaBotoes = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
         botaoTodos = MaterialButton(this, null, com.google.android.material.R.attr.materialButtonOutlinedStyle)
         botaoPrincipal = MaterialButton(this)
@@ -166,7 +210,7 @@ class MainActivity : AppCompatActivity() {
                 val total = videos.filter { it.uri in selecionados }.sumOf { it.tamanho }
                 AlertDialog.Builder(this@MainActivity)
                     .setTitle("Apagar definitivamente?")
-                    .setMessage("${uris.size} vídeos (${formatarTamanho(total)}) serão apagados para sempre. Não dá para desfazer.")
+                    .setMessage("${uris.size} $palavra (${formatarTamanho(total)}) serão apagados para sempre. Não dá para desfazer.")
                     .setPositiveButton("Apagar") { _, _ ->
                         if (uris.isNotEmpty()) {
                             val pi = MediaStore.createDeleteRequest(contentResolver, uris)
@@ -200,7 +244,9 @@ class MainActivity : AppCompatActivity() {
 
     private fun atualizarCabecalho() {
         qualidadeGrupo.visibility = if (modo == Modo.VIDEOS) View.VISIBLE else View.GONE
+        resolucaoGrupo.visibility = if (modo == Modo.VIDEOS && modulo == Modulo.IMAGENS) View.VISIBLE else View.GONE
         abas.visibility = if (modo == Modo.FILA) View.GONE else View.VISIBLE
+        modulos.visibility = if (modo == Modo.FILA) View.GONE else View.VISIBLE
         val vermelho = 0xFFD32F2F.toInt()
         val azul = 0xFF1E6FD9.toInt()
         val corExtra = if (modo == Modo.LIXEIRA) vermelho else azul
@@ -219,7 +265,8 @@ class MainActivity : AppCompatActivity() {
         when (modo) {
             Modo.VIDEOS -> {
                 val total = videos.filter { it.uri in selecionados }.sumOf { it.tamanho }
-                resumo.text = "${videos.size} vídeos na galeria • ${selecionados.size} selecionados (${formatarTamanho(total)})"
+                resumo.text = "${videos.size} $palavra na galeria • ${selecionados.size} selecionados (${formatarTamanho(total)})" +
+                        if (modulo == Modulo.IMAGENS) "\nTudo é salvo em JPEG (HEIC, PNG, WebP… são convertidos)." else ""
                 botaoTodos.text = if (selecionados.size == videos.size && videos.isNotEmpty()) "Limpar" else "Todos"
                 botaoPrincipal.text = "Compactar (${selecionados.size})"
                 botaoPrincipal.isEnabled = selecionados.isNotEmpty()
@@ -229,7 +276,7 @@ class MainActivity : AppCompatActivity() {
                 val ocupado = videos.sumOf { it.tamanho }
                 val sel = videos.filter { it.uri in selecionados }.sumOf { it.tamanho }
                 resumo.text = if (videos.isEmpty()) "A lixeira está vazia."
-                else "${videos.size} vídeos na lixeira ocupando ${formatarTamanho(ocupado)}. " +
+                else "${videos.size} $palavra na lixeira ocupando ${formatarTamanho(ocupado)}. " +
                         "São apagados sozinhos após 30 dias.\n${selecionados.size} selecionados (${formatarTamanho(sel)})."
                 botaoApagar.text = "Apagar definitivamente (${selecionados.size})"
                 botaoApagar.isEnabled = selecionados.isNotEmpty()
@@ -249,9 +296,9 @@ class MainActivity : AppCompatActivity() {
                     botaoPrincipal.isEnabled = true
                 } else {
                     val ok = e.concluidos
-                    resumo.text = "Concluído: ${ok.size} de ${e.itens.size} vídeos. " +
+                    resumo.text = "Concluído: ${ok.size} de ${e.itens.size} arquivos. " +
                             "Economia de ${formatarTamanho(e.economia)}.\n" +
-                            "Confira alguns vídeos na galeria antes de mover os originais para a lixeira."
+                            "Confira alguns na galeria antes de mover os originais para a lixeira."
                     botaoTodos.visibility = View.VISIBLE
                     botaoTodos.text = "Voltar"
                     botaoPrincipal.text = "Originais → lixeira (${ok.size})"
@@ -264,6 +311,7 @@ class MainActivity : AppCompatActivity() {
     private fun acaoSecundaria() {
         if (modo == Modo.FILA) {
             Fila.nova(emptyList())
+            abas.check(abaVideos.id)
             mudarModo(Modo.VIDEOS)
             return
         }
@@ -286,7 +334,7 @@ class MainActivity : AppCompatActivity() {
             Modo.FILA -> {
                 if (Fila.emAndamento) {
                     AlertDialog.Builder(this)
-                        .setMessage("Cancelar a compactação? Os vídeos já concluídos continuam salvos.")
+                        .setMessage("Cancelar a compactação? Os arquivos já concluídos continuam salvos.")
                         .setPositiveButton("Cancelar compactação") { _, _ ->
                             startService(Intent(this, CompressService::class.java).setAction(CompressService.ACAO_CANCELAR))
                         }
@@ -294,7 +342,7 @@ class MainActivity : AppCompatActivity() {
                 } else {
                     val uris = Fila.estado.value.concluidos.map { it.video.uri }
                     AlertDialog.Builder(this)
-                        .setMessage("Mover ${uris.size} vídeos originais para a lixeira? Eles podem ser restaurados pela aba Lixeira deste app por até 30 dias.")
+                        .setMessage("Mover ${uris.size} originais para a lixeira? Eles podem ser restaurados pela aba Lixeira deste app por até 30 dias.")
                         .setPositiveButton("Mover") { _, _ -> pedirTrash(uris, paraLixeira = true) }
                         .setNegativeButton("Agora não", null).show()
                 }
@@ -330,7 +378,7 @@ class MainActivity : AppCompatActivity() {
         if (lista.isEmpty()) return
         AlertDialog.Builder(this)
             .setTitle("Mover para a lixeira?")
-            .setMessage("${lista.size} vídeos originais (${formatarTamanho(lista.sumOf { it.tamanho })}) já têm uma cópia compactada. " +
+            .setMessage("${lista.size} $palavra originais (${formatarTamanho(lista.sumOf { it.tamanho })}) já têm uma cópia compactada. " +
                     "Eles vão para a lixeira e podem ser restaurados pela aba Lixeira por até 30 dias.")
             .setPositiveButton("Mover") { _, _ -> pedirTrash(lista.map { it.uri }, paraLixeira = true) }
             .setNegativeButton("Agora não", null).show()
@@ -342,7 +390,10 @@ class MainActivity : AppCompatActivity() {
         if (modo == Modo.FILA) return
         val lixeira = modo == Modo.LIXEIRA
         lifecycleScope.launch {
-            videos = withContext(Dispatchers.IO) { consultar(lixeira) }
+            val m = modulo
+            val achados = withContext(Dispatchers.IO) { consultar(lixeira, m) }
+            if (m != modulo) return@launch
+            videos = achados
             selecionados.retainAll(videos.map { it.uri }.toSet())
             jaCompactadosCache = if (lixeira) emptySet() else originaisJaCompactados().map { it.uri }.toSet()
             adaptador.notifyDataSetChanged()
@@ -350,7 +401,8 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun consultar(lixeira: Boolean): List<Video> {
+    private fun consultar(lixeira: Boolean, m: Modulo): List<Video> {
+        if (m == Modulo.IMAGENS) return consultarImagens(lixeira)
         val colecao = MediaStore.Video.Media.getContentUri(MediaStore.VOLUME_EXTERNAL)
         val campos = arrayOf(
             MediaStore.Video.Media._ID, MediaStore.Video.Media.DISPLAY_NAME, MediaStore.Video.Media.SIZE,
@@ -381,6 +433,41 @@ class MainActivity : AppCompatActivity() {
         return saida
     }
 
+    private fun consultarImagens(lixeira: Boolean): List<Video> {
+        val colecao = MediaStore.Images.Media.getContentUri(MediaStore.VOLUME_EXTERNAL)
+        val campos = arrayOf(
+            MediaStore.Images.Media._ID, MediaStore.Images.Media.DISPLAY_NAME, MediaStore.Images.Media.SIZE,
+            MediaStore.Images.Media.WIDTH, MediaStore.Images.Media.HEIGHT, MediaStore.Images.Media.DATE_TAKEN,
+            MediaStore.Images.Media.RELATIVE_PATH, MediaStore.Images.Media.MIME_TYPE,
+        )
+        val args = Bundle().apply {
+            putStringArray(android.content.ContentResolver.QUERY_ARG_SORT_COLUMNS, arrayOf(MediaStore.Images.Media.SIZE))
+            putInt(android.content.ContentResolver.QUERY_ARG_SORT_DIRECTION, android.content.ContentResolver.QUERY_SORT_DIRECTION_DESCENDING)
+            if (lixeira) putInt(MediaStore.QUERY_ARG_MATCH_TRASHED, MediaStore.MATCH_ONLY)
+        }
+        val saida = mutableListOf<Video>()
+        contentResolver.query(colecao, campos, args, null)?.use { c ->
+            while (c.moveToNext()) {
+                val id = c.getLong(0)
+                val mime = c.getString(7) ?: ""
+                if (mime == "image/gif" || mime == "image/svg+xml") continue
+                saida += Video(
+                    uri = ContentUris.withAppendedId(colecao, id),
+                    nome = c.getString(1) ?: "imagem",
+                    tamanho = c.getLong(2),
+                    duracaoMs = 0,
+                    largura = c.getInt(3),
+                    altura = c.getInt(4),
+                    dataCaptura = c.getLong(5),
+                    pasta = c.getString(6),
+                    imagem = true,
+                    mime = mime,
+                )
+            }
+        }
+        return saida
+    }
+
     // ---------- Miniaturas ----------
 
     private val cacheMiniaturas = object : android.util.LruCache<android.net.Uri, Bitmap>(40 * 1024 * 1024) {
@@ -403,12 +490,12 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun assistir(uri: android.net.Uri) {
+    private fun assistir(uri: android.net.Uri, imagem: Boolean = false) {
         try {
-            startActivity(Intent(Intent.ACTION_VIEW).setDataAndType(uri, "video/*")
+            startActivity(Intent(Intent.ACTION_VIEW).setDataAndType(uri, if (imagem) "image/*" else "video/*")
                 .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION))
         } catch (_: Exception) {
-            Toast.makeText(this, "Não foi possível abrir o vídeo.", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, "Não foi possível abrir o arquivo.", Toast.LENGTH_SHORT).show()
         }
     }
 
@@ -478,7 +565,7 @@ class MainActivity : AppCompatActivity() {
                 h.check.visibility = View.VISIBLE
                 h.check.isChecked = v.uri in selecionados
                 carregarMiniatura(h.miniatura, v.uri)
-                h.miniatura.setOnClickListener { assistir(v.uri) }
+                h.miniatura.setOnClickListener { assistir(v.uri, v.imagem) }
                 h.titulo.text = dataLegivel(v)
                 val min = v.duracaoMs / 60000
                 val seg = (v.duracaoMs / 1000) % 60
@@ -488,7 +575,11 @@ class MainActivity : AppCompatActivity() {
                     v.uri in jaCompactadosCache -> "\n✓ Já compactado (original)"
                     else -> ""
                 }
-                h.detalhe.text = "${formatarTamanho(v.tamanho)} • $res • ${min}min${String.format("%02d", seg)}s\n${v.nome}$marca"
+                h.detalhe.text = if (v.imagem) {
+                    val mp = v.largura.toLong() * v.altura / 1_000_000.0
+                    val formato = v.nome.substringAfterLast('.', "").uppercase().ifEmpty { v.mime.substringAfter('/').uppercase() }
+                    "${formatarTamanho(v.tamanho)} • ${v.largura}×${v.altura} (${String.format("%.1f", mp)} MP) • $formato\n${v.nome}$marca"
+                } else "${formatarTamanho(v.tamanho)} • $res • ${min}min${String.format("%02d", seg)}s\n${v.nome}$marca"
                 h.barra.visibility = View.GONE
                 h.raiz.setOnClickListener {
                     if (!selecionados.remove(v.uri)) selecionados.add(v.uri)

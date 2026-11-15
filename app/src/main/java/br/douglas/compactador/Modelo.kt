@@ -3,6 +3,7 @@ package br.douglas.compactador
 import android.net.Uri
 import kotlinx.coroutines.flow.MutableStateFlow
 
+/** Um vídeo ou uma imagem da galeria. */
 data class Video(
     val uri: Uri,
     val nome: String,
@@ -12,12 +13,24 @@ data class Video(
     val altura: Int,
     val dataCaptura: Long,
     val pasta: String?,
+    val imagem: Boolean = false,
+    val mime: String = "",
 )
 
-enum class Qualidade(val rotulo: String, val fator: Double, val bitsPorPixel: Double) {
-    ALTA("Alta (quase idêntico)", 0.55, 0.060),
-    EQUILIBRADA("Equilibrada", 0.40, 0.045),
-    ECONOMIA("Máxima economia", 0.28, 0.030),
+enum class Modulo(val rotulo: String) { VIDEOS("Vídeos"), IMAGENS("Imagens") }
+
+enum class Qualidade(val rotulo: String, val fator: Double, val bitsPorPixel: Double, val qualidadeJpeg: Int) {
+    ALTA("Alta (quase idêntico)", 0.55, 0.060, 90),
+    EQUILIBRADA("Equilibrada", 0.40, 0.045, 80),
+    ECONOMIA("Máxima economia", 0.28, 0.030, 65),
+}
+
+/** Redução de resolução das imagens, em percentual de cada lado. */
+enum class Resolucao(val rotulo: String, val percentual: Int) {
+    ORIGINAL("Original", 100),
+    P75("75%", 75),
+    P50("50%", 50),
+    P25("25%", 25),
 }
 
 enum class Situacao { AGUARDANDO, PROCESSANDO, CONCLUIDO, PULADO, ERRO }
@@ -47,6 +60,7 @@ object Fila {
     var emAndamento = false
     var cancelado = false
     var qualidade: Qualidade = Qualidade.ALTA
+    var resolucao: Resolucao = Resolucao.ORIGINAL
 
     val estado = MutableStateFlow(EstadoFila())
 
@@ -68,5 +82,8 @@ object Fila {
 fun formatarTamanho(bytes: Long): String {
     val gb = bytes / 1_073_741_824.0
     if (gb >= 1) return String.format("%.2f GB", gb)
-    return String.format("%.0f MB", bytes / 1_048_576.0)
+    val mb = bytes / 1_048_576.0
+    if (mb >= 10) return String.format("%.0f MB", mb)
+    if (mb >= 1) return String.format("%.1f MB", mb)
+    return String.format("%.0f KB", bytes / 1024.0)
 }

@@ -53,20 +53,20 @@ jobs:
         run: gradle assembleRelease --no-daemon --stacktrace
 
       - name: Renomear APK
-        run: cp app/build/outputs/apk/release/app-release.apk CompactadorVideos.apk
+        run: cp app/build/outputs/apk/release/app-release.apk CompactadorMidias.apk
 
       - uses: actions/upload-artifact@v4
         with:
-          name: CompactadorVideos
-          path: CompactadorVideos.apk
+          name: CompactadorMidias
+          path: CompactadorMidias.apk
 
       - name: Publicar versão
         uses: softprops/action-gh-release@v2
         with:
           tag_name: v${{ github.run_number }}
           name: Versão ${{ github.run_number }}
-          body: Baixe o arquivo CompactadorVideos.apk abaixo e instale no celular.
-          files: CompactadorVideos.apk
+          body: Baixe o arquivo CompactadorMidias.apk abaixo e instale no celular.
+          files: CompactadorMidias.apk
           make_latest: true
 
       - name: Apagar versões anteriores
