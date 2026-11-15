@@ -26,6 +26,16 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
+import androidx.core.content.IntentCompat
+import androidx.core.widget.doAfterTextChanged
+import androidx.activity.result.PickVisualMediaRequest
+import android.content.ClipData
+import android.net.Uri
+import android.provider.OpenableColumns
+import android.text.TextUtils
+import android.view.inputmethod.EditorInfo
+import android.view.inputmethod.InputMethodManager
+import android.widget.EditText
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.lifecycle.lifecycleScope
@@ -44,7 +54,25 @@ class MainActivity : AppCompatActivity() {
     private var modo = Modo.VIDEOS
     private var modulo = Modulo.VIDEOS
     private val palavra get() = if (modulo == Modulo.IMAGENS) "imagens" else "vídeos"
+    private enum class Ordem(val rotulo: String) {
+        MAIORES("Maiores"), RECENTES("Mais recentes"), ANTIGOS("Mais antigos"), NOME("Nome (A–Z)")
+    }
+    private enum class Periodo(val rotulo: String, val dias: Int) {
+        TODOS("Qualquer data", 0), HOJE("Hoje", 1), SEMANA("Últimos 7 dias", 7),
+        MES("Últimos 30 dias", 30), ANO("Último ano", 365)
+    }
+
+    /** Tudo o que existe na galeria (ou lixeira) do módulo atual. */
+    private var todos: List<Video> = emptyList()
+    /** O que aparece na lista, depois de filtros, busca e ordem. */
     private var videos: List<Video> = emptyList()
+    private var ordem = Ordem.MAIORES
+    private var album: String? = null
+    private var periodo = Periodo.TODOS
+    private var busca = ""
+    /** Arquivos vindos do "Compartilhar" ou do seletor do Android; quando não nulo, só eles aparecem. */
+    private var escolhidos: Set<Uri>? = null
+    private var ignorarCliques = false
     private val selecionados = mutableSetOf<android.net.Uri>()
     private var jaCompactadosCache: Set<android.net.Uri> = emptySet()
 
@@ -58,11 +86,22 @@ class MainActivity : AppCompatActivity() {
     private lateinit var botaoPrincipal: MaterialButton
     private lateinit var botaoApagar: MaterialButton
     private lateinit var lista: RecyclerView
+    private lateinit var filtrosGrupo: LinearLayout
+    private lateinit var botaoOrdem: MaterialButton
+    private lateinit var botaoAlbum: MaterialButton
+    private lateinit var botaoData: MaterialButton
+    private lateinit var campoBusca: EditText
+    private lateinit var avisoEscolhidos: TextView
+    private val preferencias by lazy { getSharedPreferences("preferencias", MODE_PRIVATE) }
+
+    private val escolherNaGaleria = registerForActivityResult(
+        ActivityResultContracts.PickMultipleVisualMedia(500)
+    ) { uris -> if (uris.isNotEmpty()) abrirEscolhidos(uris) }
     private val adaptador = Adaptador()
 
     private val pedirPermissoes = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
-    ) { carregar() }
+    ) { carregar(); tratarIntent(intent) }
 
     private val pedirLixeira = registerForActivityResult(
         ActivityResultContracts.StartIntentSenderForResult()
@@ -76,6 +115,7 @@ class MainActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        ordem = runCatching { Ordem.valueOf(preferencias.getString("ordem", null)!!) }.getOrDefault(Ordem.MAIORES)
         construirTela()
 
         lifecycleScope.launch {
@@ -95,7 +135,24 @@ class MainActivity : AppCompatActivity() {
             Manifest.permission.ACCESS_MEDIA_LOCATION, Manifest.permission.POST_NOTIFICATIONS,
         )
             .filter { ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED }
-        if (faltando.isEmpty()) carregar() else pedirPermissoes.launch(faltando.toTypedArray())
+        if (faltando.isEmpty()) { carregar(); tratarIntent(intent) } else pedirPermissoes.launch(faltando.toTypedArray())
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        tratarIntent(intent)
+    }
+
+    /** Arquivos enviados pelo "Compartilhar" da Galeria / Google Fotos. */
+    private fun tratarIntent(i: Intent?) {
+        val uris: List<Uri> = when (i?.action) {
+            Intent.ACTION_SEND -> listOfNotNull(IntentCompat.getParcelableExtra(i, Intent.EXTRA_STREAM, Uri::class.java))
+            Intent.ACTION_SEND_MULTIPLE ->
+                IntentCompat.getParcelableArrayListExtra(i, Intent.EXTRA_STREAM, Uri::class.java) ?: emptyList()
+            else -> return
+        }
+        setIntent(Intent(this, MainActivity::class.java))
+        if (uris.isNotEmpty()) abrirEscolhidos(uris)
     }
 
     // ---------- Interface ----------
@@ -128,10 +185,12 @@ class MainActivity : AppCompatActivity() {
             if (m == modulo) modulos.check(b.id)
         }
         modulos.addOnButtonCheckedListener { g, id, marcado ->
-            if (!marcado || Fila.emAndamento) return@addOnButtonCheckedListener
+            if (!marcado || Fila.emAndamento || ignorarCliques) return@addOnButtonCheckedListener
             val m = g.findViewById<View>(id).tag as Modulo
             if (m == modulo) return@addOnButtonCheckedListener
             modulo = m
+            album = null
+            todos = emptyList()
             videos = emptyList()
             adaptador.notifyDataSetChanged()
             mudarModo(modo)
@@ -150,7 +209,7 @@ class MainActivity : AppCompatActivity() {
         abas.addView(abaLixeira, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
         abas.check(abaVideos.id)
         abas.addOnButtonCheckedListener { _, id, marcado ->
-            if (!marcado || Fila.emAndamento) return@addOnButtonCheckedListener
+            if (!marcado || Fila.emAndamento || ignorarCliques) return@addOnButtonCheckedListener
             mudarModo(if (id == abaLixeira.id) Modo.LIXEIRA else Modo.VIDEOS)
         }
         raiz.addView(abas, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
@@ -193,6 +252,47 @@ class MainActivity : AppCompatActivity() {
         resolucaoGrupo.addView(grupoR, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
         raiz.addView(resolucaoGrupo)
 
+        // ---- Localizar: ordem, álbum, data, busca e seletor do Android ----
+        filtrosGrupo = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(0, dp(6), 0, 0) }
+        fun botaoPequeno() = MaterialButton(this, null, com.google.android.material.R.attr.materialButtonOutlinedStyle).apply {
+            textSize = 12f; maxLines = 1; ellipsize = TextUtils.TruncateAt.END
+            setPadding(dp(6), 0, dp(6), 0); insetTop = 0; insetBottom = 0; minHeight = dp(40)
+        }
+        val linhaF = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        botaoOrdem = botaoPequeno().apply { setOnClickListener { escolherOrdem() } }
+        botaoAlbum = botaoPequeno().apply { setOnClickListener { escolherAlbum() } }
+        botaoData = botaoPequeno().apply { setOnClickListener { escolherPeriodo() } }
+        listOf(botaoOrdem, botaoAlbum, botaoData).forEachIndexed { i, b ->
+            linhaF.addView(b, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { if (i < 2) marginEnd = dp(6) })
+        }
+        filtrosGrupo.addView(linhaF)
+        val linhaBusca = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
+        campoBusca = EditText(this).apply {
+            hint = "Buscar por nome ou álbum"; textSize = 14f; isSingleLine = true
+            imeOptions = EditorInfo.IME_ACTION_SEARCH
+            doAfterTextChanged { busca = it?.toString() ?: ""; if (modo != Modo.FILA) aplicarFiltros() }
+            setOnEditorActionListener { v, _, _ ->
+                getSystemService(InputMethodManager::class.java).hideSoftInputFromWindow(v.windowToken, 0); v.clearFocus(); true
+            }
+        }
+        val botaoGaleria = botaoPequeno().apply {
+            text = "Escolher na galeria"
+            setOnClickListener {
+                val tipo = if (modulo == Modulo.IMAGENS) ActivityResultContracts.PickVisualMedia.ImageOnly
+                else ActivityResultContracts.PickVisualMedia.VideoOnly
+                escolherNaGaleria.launch(PickVisualMediaRequest(tipo))
+            }
+        }
+        linhaBusca.addView(campoBusca, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { marginEnd = dp(6) })
+        linhaBusca.addView(botaoGaleria, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+        filtrosGrupo.addView(linhaBusca)
+        avisoEscolhidos = TextView(this).apply {
+            textSize = 13f; setTextColor(0xFF1E6FD9.toInt()); setPadding(0, dp(4), 0, dp(2)); visibility = View.GONE
+            setOnClickListener { escolhidos = null; aplicarFiltros() }
+        }
+        filtrosGrupo.addView(avisoEscolhidos)
+        raiz.addView(filtrosGrupo)
+
         val linhaBotoes = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
         botaoTodos = MaterialButton(this, null, com.google.android.material.R.attr.materialButtonOutlinedStyle)
         botaoPrincipal = MaterialButton(this)
@@ -205,9 +305,10 @@ class MainActivity : AppCompatActivity() {
             strokeColor = android.content.res.ColorStateList.valueOf(0xFFD32F2F.toInt())
             visibility = View.GONE
             setOnClickListener {
+                if (modo == Modo.FILA) { compartilharResultado(); return@setOnClickListener }
                 if (modo == Modo.VIDEOS) { moverJaCompactados(); return@setOnClickListener }
                 val uris = selecionados.toList()
-                val total = videos.filter { it.uri in selecionados }.sumOf { it.tamanho }
+                val total = todos.filter { it.uri in selecionados }.sumOf { it.tamanho }
                 AlertDialog.Builder(this@MainActivity)
                     .setTitle("Apagar definitivamente?")
                     .setMessage("${uris.size} $palavra (${formatarTamanho(total)}) serão apagados para sempre. Não dá para desfazer.")
@@ -236,6 +337,7 @@ class MainActivity : AppCompatActivity() {
     private fun mudarModo(m: Modo) {
         modo = m
         selecionados.clear()
+        escolhidos = null
         if (m == Modo.FILA) {
             adaptador.notifyDataSetChanged()
             atualizarCabecalho()
@@ -247,6 +349,15 @@ class MainActivity : AppCompatActivity() {
         resolucaoGrupo.visibility = if (modo == Modo.VIDEOS && modulo == Modulo.IMAGENS) View.VISIBLE else View.GONE
         abas.visibility = if (modo == Modo.FILA) View.GONE else View.VISIBLE
         modulos.visibility = if (modo == Modo.FILA) View.GONE else View.VISIBLE
+        filtrosGrupo.visibility = if (modo == Modo.FILA) View.GONE else View.VISIBLE
+        botaoOrdem.text = "↕ ${ordem.rotulo}"
+        botaoAlbum.text = album ?: "Todos os álbuns"
+        botaoData.text = periodo.rotulo
+        val esc = escolhidos
+        avisoEscolhidos.visibility = if (esc != null && modo != Modo.FILA) View.VISIBLE else View.GONE
+        if (esc != null) avisoEscolhidos.text = "Mostrando só os ${esc.size} escolhidos • toque aqui para ver todos"
+        val visiveisMarcados = videos.isNotEmpty() && selecionados.containsAll(videos.map { it.uri })
+        val prefixo = if (videos.size != todos.size) "${videos.size} de " else ""
         val vermelho = 0xFFD32F2F.toInt()
         val azul = 0xFF1E6FD9.toInt()
         val corExtra = if (modo == Modo.LIXEIRA) vermelho else azul
@@ -256,7 +367,8 @@ class MainActivity : AppCompatActivity() {
         botaoApagar.visibility = when (modo) {
             Modo.LIXEIRA -> View.VISIBLE
             Modo.VIDEOS -> if (pendentes.isNotEmpty()) View.VISIBLE else View.GONE
-            else -> View.GONE
+            Modo.FILA -> if (!Fila.estado.value.emAndamento && Fila.estado.value.concluidos.any { it.uriFinal != null })
+                View.VISIBLE else View.GONE
         }
         if (modo == Modo.VIDEOS && pendentes.isNotEmpty()) {
             botaoApagar.isEnabled = true
@@ -264,23 +376,23 @@ class MainActivity : AppCompatActivity() {
         }
         when (modo) {
             Modo.VIDEOS -> {
-                val total = videos.filter { it.uri in selecionados }.sumOf { it.tamanho }
-                resumo.text = "${videos.size} $palavra na galeria • ${selecionados.size} selecionados (${formatarTamanho(total)})" +
+                val total = todos.filter { it.uri in selecionados }.sumOf { it.tamanho }
+                resumo.text = "$prefixo${todos.size} $palavra • ${selecionados.size} selecionados (${formatarTamanho(total)})" +
                         if (modulo == Modulo.IMAGENS) "\nTudo é salvo em JPEG (HEIC, PNG, WebP… são convertidos)." else ""
-                botaoTodos.text = if (selecionados.size == videos.size && videos.isNotEmpty()) "Limpar" else "Todos"
+                botaoTodos.text = if (visiveisMarcados) "Limpar" else "Marcar todos"
                 botaoPrincipal.text = "Compactar (${selecionados.size})"
                 botaoPrincipal.isEnabled = selecionados.isNotEmpty()
                 botaoTodos.visibility = View.VISIBLE
             }
             Modo.LIXEIRA -> {
-                val ocupado = videos.sumOf { it.tamanho }
-                val sel = videos.filter { it.uri in selecionados }.sumOf { it.tamanho }
-                resumo.text = if (videos.isEmpty()) "A lixeira está vazia."
-                else "${videos.size} $palavra na lixeira ocupando ${formatarTamanho(ocupado)}. " +
+                val ocupado = todos.sumOf { it.tamanho }
+                val sel = todos.filter { it.uri in selecionados }.sumOf { it.tamanho }
+                resumo.text = if (todos.isEmpty()) "A lixeira está vazia."
+                else "$prefixo${todos.size} $palavra na lixeira ocupando ${formatarTamanho(ocupado)}. " +
                         "São apagados sozinhos após 30 dias.\n${selecionados.size} selecionados (${formatarTamanho(sel)})."
                 botaoApagar.text = "Apagar definitivamente (${selecionados.size})"
                 botaoApagar.isEnabled = selecionados.isNotEmpty()
-                botaoTodos.text = if (selecionados.size == videos.size && videos.isNotEmpty()) "Limpar" else "Todos"
+                botaoTodos.text = if (visiveisMarcados) "Limpar" else "Marcar todos"
                 botaoPrincipal.text = "Restaurar (${selecionados.size})"
                 botaoPrincipal.isEnabled = selecionados.isNotEmpty()
                 botaoTodos.visibility = View.VISIBLE
@@ -303,6 +415,8 @@ class MainActivity : AppCompatActivity() {
                     botaoTodos.text = "Voltar"
                     botaoPrincipal.text = "Originais → lixeira (${ok.size})"
                     botaoPrincipal.isEnabled = ok.isNotEmpty()
+                    botaoApagar.isEnabled = true
+                    botaoApagar.text = "Compartilhar compactados (${ok.count { it.uriFinal != null }})"
                 }
             }
         }
@@ -315,8 +429,9 @@ class MainActivity : AppCompatActivity() {
             mudarModo(Modo.VIDEOS)
             return
         }
-        if (selecionados.size == videos.size) selecionados.clear()
-        else selecionados.addAll(videos.map { it.uri })
+        val visiveis = videos.map { it.uri }
+        if (visiveis.isNotEmpty() && selecionados.containsAll(visiveis)) selecionados.removeAll(visiveis.toSet())
+        else selecionados.addAll(visiveis)
         adaptador.notifyDataSetChanged()
         atualizarCabecalho()
     }
@@ -324,8 +439,7 @@ class MainActivity : AppCompatActivity() {
     private fun acaoPrincipal() {
         when (modo) {
             Modo.VIDEOS -> {
-                val escolhidos = videos.filter { it.uri in selecionados }
-                Fila.nova(escolhidos)
+                Fila.nova(todos.filter { it.uri in selecionados })
                 modo = Modo.FILA
                 ContextCompat.startForegroundService(this, Intent(this, CompressService::class.java))
                 atualizarCabecalho()
@@ -365,9 +479,9 @@ class MainActivity : AppCompatActivity() {
 
     /** Originais que já têm uma cópia "_compactado" menor na galeria. */
     private fun originaisJaCompactados(): List<Video> {
-        val copias = videos.filter { nomeBase(it.nome).endsWith("_compactado") }
+        val copias = todos.filter { nomeBase(it.nome).endsWith("_compactado") }
             .associateBy { nomeBase(it.nome).removeSuffix("_compactado") }
-        return videos.filter { v ->
+        return todos.filter { v ->
             val copia = copias[nomeBase(v.nome)]
             !nomeBase(v.nome).endsWith("_compactado") && copia != null && copia.tamanho in 1 until v.tamanho
         }
@@ -393,12 +507,153 @@ class MainActivity : AppCompatActivity() {
             val m = modulo
             val achados = withContext(Dispatchers.IO) { consultar(lixeira, m) }
             if (m != modulo) return@launch
-            videos = achados
-            selecionados.retainAll(videos.map { it.uri }.toSet())
+            todos = achados
+            selecionados.retainAll(todos.map { it.uri }.toSet())
             jaCompactadosCache = if (lixeira) emptySet() else originaisJaCompactados().map { it.uri }.toSet()
-            adaptador.notifyDataSetChanged()
-            atualizarCabecalho()
+            aplicarFiltros()
         }
+    }
+
+    // ---------- Localizar ----------
+
+    private fun aplicarFiltros() {
+        val limite = when (periodo) {
+            Periodo.TODOS -> 0L
+            Periodo.HOJE -> java.util.Calendar.getInstance().apply {
+                set(java.util.Calendar.HOUR_OF_DAY, 0); set(java.util.Calendar.MINUTE, 0)
+                set(java.util.Calendar.SECOND, 0); set(java.util.Calendar.MILLISECOND, 0)
+            }.timeInMillis
+            else -> System.currentTimeMillis() - periodo.dias * 86_400_000L
+        }
+        val termo = busca.trim()
+        val esc = escolhidos
+        var s = todos.asSequence()
+        if (esc != null) s = s.filter { it.uri in esc }
+        album?.let { a -> s = s.filter { it.album == a } }
+        if (limite > 0) s = s.filter { it.data >= limite }
+        if (termo.isNotEmpty()) s = s.filter { it.nome.contains(termo, true) || it.album?.contains(termo, true) == true }
+        videos = when (ordem) {
+            Ordem.MAIORES -> s.sortedByDescending { it.tamanho }
+            Ordem.RECENTES -> s.sortedByDescending { it.data }
+            Ordem.ANTIGOS -> s.sortedBy { it.data }
+            Ordem.NOME -> s.sortedBy { it.nome.lowercase() }
+        }.toList()
+        adaptador.notifyDataSetChanged()
+        lista.scrollToPosition(0)
+        atualizarCabecalho()
+    }
+
+    private fun escolherOrdem() {
+        AlertDialog.Builder(this).setTitle("Ordenar por")
+            .setSingleChoiceItems(Ordem.entries.map { it.rotulo }.toTypedArray(), ordem.ordinal) { d, i ->
+                ordem = Ordem.entries[i]
+                preferencias.edit().putString("ordem", ordem.name).apply()
+                d.dismiss(); aplicarFiltros()
+            }.show()
+    }
+
+    private fun escolherAlbum() {
+        val contagem = todos.groupingBy { it.album ?: "Sem álbum" }.eachCount().entries.sortedByDescending { it.value }
+        val nomes = listOf("Todos os álbuns (${todos.size})") + contagem.map { "${it.key} (${it.value})" }
+        val atual = if (album == null) 0 else contagem.indexOfFirst { it.key == album } + 1
+        AlertDialog.Builder(this).setTitle("Álbum")
+            .setSingleChoiceItems(nomes.toTypedArray(), atual) { d, i ->
+                album = if (i == 0) null else contagem[i - 1].key
+                d.dismiss(); aplicarFiltros()
+            }.show()
+    }
+
+    private fun escolherPeriodo() {
+        AlertDialog.Builder(this).setTitle("Data")
+            .setSingleChoiceItems(Periodo.entries.map { it.rotulo }.toTypedArray(), periodo.ordinal) { d, i ->
+                periodo = Periodo.entries[i]
+                d.dismiss(); aplicarFiltros()
+            }.show()
+    }
+
+    /** Localiza na galeria os arquivos vindos do "Compartilhar" ou do seletor do Android e os deixa marcados. */
+    private fun abrirEscolhidos(uris: List<Uri>) {
+        if (Fila.emAndamento) {
+            Toast.makeText(this, "Espere a compactação atual terminar.", Toast.LENGTH_LONG).show()
+            return
+        }
+        lifecycleScope.launch {
+            val (imagens, filmes, achadosI, achadosV) = withContext(Dispatchers.IO) {
+                val imgs = consultarImagens(false)
+                val vids = consultar(false, Modulo.VIDEOS)
+                val ai = mutableListOf<Video>(); val av = mutableListOf<Video>()
+                for (u in uris) {
+                    val i = localizar(u, imgs)
+                    if (i != null) ai += i else localizar(u, vids)?.let { av += it }
+                }
+                listOf(imgs, vids, ai.distinct(), av.distinct())
+            }
+            if (achadosI.isEmpty() && achadosV.isEmpty()) {
+                AlertDialog.Builder(this@MainActivity).setTitle("Não encontrei")
+                    .setMessage("Esses arquivos não estão na memória do celular (podem estar só na nuvem). Baixe-os para o aparelho e tente de novo.")
+                    .setPositiveButton("OK", null).show()
+                return@launch
+            }
+            val m = if (achadosI.size >= achadosV.size) Modulo.IMAGENS else Modulo.VIDEOS
+            val lista = if (m == Modulo.IMAGENS) achadosI else achadosV
+            val ignorados = uris.size - lista.size
+            if (ignorados > 0) Toast.makeText(this@MainActivity,
+                "$ignorados arquivo(s) ficaram de fora (vídeos e imagens são compactados separadamente, ou não estão no celular).",
+                Toast.LENGTH_LONG).show()
+
+            ignorarCliques = true
+            modulo = m
+            for (k in 0 until modulos.childCount) {
+                val b = modulos.getChildAt(k)
+                if (b.tag == m) modulos.check(b.id)
+            }
+            abas.check(abaVideos.id)
+            ignorarCliques = false
+            modo = Modo.VIDEOS
+            album = null
+            todos = if (m == Modulo.IMAGENS) imagens else filmes
+            val marcados = lista.map { it.uri }.toSet()
+            escolhidos = marcados
+            selecionados.clear()
+            selecionados.addAll(marcados)
+            jaCompactadosCache = originaisJaCompactados().map { it.uri }.toSet()
+            aplicarFiltros()
+        }
+    }
+
+    private fun localizar(u: Uri, lista: List<Video>): Video? {
+        fun porId(id: Long?) = id?.let { i -> lista.firstOrNull { ContentUris.parseId(it.uri) == i } }
+        // Galeria do Android e seletor do Android: o último número do endereço é o ID na galeria.
+        if (u.authority == "media") porId(u.lastPathSegment?.toLongOrNull())?.let { return it }
+        // Google Fotos e outros: às vezes o endereço da galeria vem embutido.
+        Regex("media/external[^/]*/(?:images|video)/media/([0-9]+)").find(Uri.decode(u.toString()))
+            ?.let { porId(it.groupValues[1].toLongOrNull())?.let { v -> return v } }
+        // Último recurso: nome e tamanho do arquivo.
+        val (nome, tamanho) = runCatching {
+            contentResolver.query(u, arrayOf(OpenableColumns.DISPLAY_NAME, OpenableColumns.SIZE), null, null, null)?.use { c ->
+                if (c.moveToFirst()) (c.getString(0) to (if (c.isNull(1)) -1L else c.getLong(1))) else null
+            }
+        }.getOrNull() ?: (null to -1L)
+        if (nome == null) return null
+        return lista.firstOrNull { it.nome == nome && (tamanho <= 0 || it.tamanho == tamanho) }
+            ?: lista.firstOrNull { it.nome == nome }
+    }
+
+    private fun compartilharResultado() {
+        val itens = Fila.estado.value.concluidos.filter { it.uriFinal != null }
+        if (itens.isEmpty()) return
+        val uris = ArrayList(itens.map { it.uriFinal!! })
+        val tipo = when {
+            itens.all { it.video.imagem } -> "image/jpeg"
+            itens.none { it.video.imagem } -> "video/mp4"
+            else -> "*/*"
+        }
+        val envio = if (uris.size == 1) Intent(Intent.ACTION_SEND).putExtra(Intent.EXTRA_STREAM, uris[0])
+        else Intent(Intent.ACTION_SEND_MULTIPLE).putParcelableArrayListExtra(Intent.EXTRA_STREAM, uris)
+        envio.type = tipo
+        envio.clipData = ClipData.newRawUri("", uris[0]).apply { uris.drop(1).forEach { addItem(ClipData.Item(it)) } }
+        envio.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        startActivity(Intent.createChooser(envio, "Enviar com"))
     }
 
     private fun consultar(lixeira: Boolean, m: Modulo): List<Video> {
@@ -408,6 +663,7 @@ class MainActivity : AppCompatActivity() {
             MediaStore.Video.Media._ID, MediaStore.Video.Media.DISPLAY_NAME, MediaStore.Video.Media.SIZE,
             MediaStore.Video.Media.DURATION, MediaStore.Video.Media.WIDTH, MediaStore.Video.Media.HEIGHT,
             MediaStore.Video.Media.DATE_TAKEN, MediaStore.Video.Media.RELATIVE_PATH,
+            MediaStore.Video.Media.BUCKET_DISPLAY_NAME, MediaStore.Video.Media.DATE_ADDED,
         )
         val args = Bundle().apply {
             putStringArray(android.content.ContentResolver.QUERY_ARG_SORT_COLUMNS, arrayOf(MediaStore.Video.Media.SIZE))
@@ -427,6 +683,8 @@ class MainActivity : AppCompatActivity() {
                     altura = c.getInt(5),
                     dataCaptura = c.getLong(6),
                     pasta = c.getString(7),
+                    album = c.getString(8),
+                    dataAdicionada = c.getLong(9),
                 )
             }
         }
@@ -439,6 +697,7 @@ class MainActivity : AppCompatActivity() {
             MediaStore.Images.Media._ID, MediaStore.Images.Media.DISPLAY_NAME, MediaStore.Images.Media.SIZE,
             MediaStore.Images.Media.WIDTH, MediaStore.Images.Media.HEIGHT, MediaStore.Images.Media.DATE_TAKEN,
             MediaStore.Images.Media.RELATIVE_PATH, MediaStore.Images.Media.MIME_TYPE,
+            MediaStore.Images.Media.BUCKET_DISPLAY_NAME, MediaStore.Images.Media.DATE_ADDED,
         )
         val args = Bundle().apply {
             putStringArray(android.content.ContentResolver.QUERY_ARG_SORT_COLUMNS, arrayOf(MediaStore.Images.Media.SIZE))
@@ -462,6 +721,8 @@ class MainActivity : AppCompatActivity() {
                     pasta = c.getString(6),
                     imagem = true,
                     mime = mime,
+                    album = c.getString(8),
+                    dataAdicionada = c.getLong(9),
                 )
             }
         }
@@ -502,7 +763,7 @@ class MainActivity : AppCompatActivity() {
     private val formatoData = java.text.SimpleDateFormat("dd/MM/yyyy 'às' HH:mm", java.util.Locale("pt", "BR"))
 
     private fun dataLegivel(v: Video) =
-        if (v.dataCaptura > 0) formatoData.format(java.util.Date(v.dataCaptura)) else v.nome
+        if (v.data > 0) formatoData.format(java.util.Date(v.data)) else v.nome
 
     // ---------- Lista ----------
 

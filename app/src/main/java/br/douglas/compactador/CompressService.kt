@@ -246,6 +246,7 @@ class CompressService : Service() {
                         throw e
                     }
                     item.tamanhoFinal = temp.length()
+                    item.uriFinal = novo
                     item.situacao = Situacao.CONCLUIDO
                     item.progresso = 100
                     item.mensagem = ""

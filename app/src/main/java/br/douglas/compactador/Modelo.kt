@@ -15,7 +15,12 @@ data class Video(
     val pasta: String?,
     val imagem: Boolean = false,
     val mime: String = "",
-)
+    val album: String? = null,
+    val dataAdicionada: Long = 0,
+) {
+    /** Data usada para ordenar e filtrar: captura, ou quando entrou na galeria. */
+    val data get() = if (dataCaptura > 0) dataCaptura else dataAdicionada * 1000
+}
 
 enum class Modulo(val rotulo: String) { VIDEOS("Vídeos"), IMAGENS("Imagens") }
 
@@ -41,6 +46,7 @@ data class ItemFila(
     var progresso: Int = 0,
     var tamanhoFinal: Long = 0,
     var mensagem: String = "",
+    var uriFinal: Uri? = null,
 )
 
 data class EstadoFila(

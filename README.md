@@ -13,6 +13,10 @@ App Android para compactar vários vídeos e imagens da galeria de uma vez. Cada
 - JPEGs que não ficariam menores são pulados; os outros formatos são sempre convertidos.
 
 ## Em comum
+- **Localizar:** ordenar (maiores, mais recentes, mais antigos, nome — o app lembra a última escolha), filtrar por álbum (Câmera, WhatsApp, Screenshots…) e por data (hoje, 7 dias, 30 dias, último ano) e buscar pelo nome.
+- **Escolher na galeria:** abre o seletor de fotos/vídeos do próprio Android.
+- **Compartilhar → Compactar:** na Galeria ou no Google Fotos, selecione os arquivos e compartilhe com o app; eles já abrem marcados.
+- **Compartilhar compactados:** ao terminar, envia os arquivos prontos para WhatsApp, e-mail etc.
 - Lista do maior para o menor; selecione vários e toque em **Compactar**.
 - Qualidade: Alta (quase idêntico), Média ou Economia.
 - O arquivo compactado é salvo na mesma pasta do original, com a mesma data de captura, e o nome termina em `_compactado`.
